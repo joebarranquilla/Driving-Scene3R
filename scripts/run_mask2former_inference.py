@@ -44,7 +44,7 @@ import numpy as np
 
 import torch
 from PIL import Image
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
 
 
@@ -244,7 +244,7 @@ def process_sequence(
             raise FileNotFoundError(f"Required path not found: {p}")
 
     frame_paths = collect_frames(image_dir)
-    print(f"  Total frames →  {len(frame_paths)}")
+    tqdm.write(f"  Total frames →  {len(frame_paths)}")
 
     out_seq_dir = os.path.join(output_dir, seq_id)
     os.makedirs(out_seq_dir, exist_ok=True)
@@ -259,16 +259,16 @@ def process_sequence(
 
     n_done = len(frame_paths) - len(pending)
     if n_done:
-        print(f"  Skipping     →  {n_done} already-saved frames (resume mode)")
+        tqdm.write(f"  Skipping     →  {n_done} already-saved frames (resume mode)")
     if not pending:
-        print("  Nothing to do — all frames already saved.")
+        tqdm.write("  Nothing to do — all frames already saved.")
         return
 
-    print(f"  To process   →  {len(pending)} frames  (batch_size={batch_size})\n")
+    tqdm.write(f"  To process   →  {len(pending)} frames  (batch_size={batch_size})\n")
 
     # --- Batched inference loop ---
     n_batches = (len(pending) + batch_size - 1) // batch_size
-    for b_idx in tqdm(range(n_batches), desc=f"seq {seq_id}", unit="batch", position=0, leave=True):
+    for b_idx in tqdm(range(n_batches), desc=f"seq {seq_id}", unit="batch", position=0, leave=True, dynamic_ncols=True):
         batch = pending[b_idx * batch_size : (b_idx + 1) * batch_size]
 
         pil_images     = []

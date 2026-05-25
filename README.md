@@ -18,3 +18,34 @@ conda activate driving-scene3r
 pip install -r requirements.txt
 ```
 
+## MobileStereoNet depth inference
+
+See `scripts/run_mobilestereonet_inference.py` for full documentation and all CLI options.
+
+### Setup
+
+```bash
+# Clone MobileStereoNet (no pip install needed)
+git clone https://github.com/cogsys-tuebingen/mobilestereonet /usr/prakt/<user>/mobilestereonet
+
+# Download a pretrained checkpoint:
+# go to https://github.com/cogsys-tuebingen/mobilestereonet,
+# click the hyperlinked model name in the evaluation table (e.g. "SF + KITTI2015")
+# and save the .ckpt to /usr/prakt/<user>/checkpoints/
+```
+
+### Run
+
+```bash
+python scripts/run_mobilestereonet_inference.py \
+    --msnet_path   /usr/prakt/<user>/mobilestereonet \
+    --dataset_root /storage/.../dataset/sequences \
+    --sequences    00 01 02 \
+    --checkpoint   /usr/prakt/<user>/checkpoints/MSNet2D_SF_KITTI2015.ckpt \
+    --output_dir   /usr/prakt/<user>/depth_predictions \
+    --batch_size   4
+```
+
+Output: `{output_dir}/{sequence}/{frame_stem}.npz` with key `"depth"` — float32 (H, W) in metres.  
+Interrupted runs resume automatically (existing frames are skipped).
+

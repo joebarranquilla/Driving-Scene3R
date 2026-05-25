@@ -268,7 +268,7 @@ def process_sequence(
 
     # --- Batched inference loop ---
     n_batches = (len(pending) + batch_size - 1) // batch_size
-    for b_idx in tqdm(range(n_batches), desc=f"seq {seq_id}", unit="batch"):
+    for b_idx in tqdm(range(n_batches), desc=f"seq {seq_id}", unit="batch", position=0, leave=True):
         batch = pending[b_idx * batch_size : (b_idx + 1) * batch_size]
 
         pil_images     = []

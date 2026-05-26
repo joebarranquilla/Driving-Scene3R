@@ -49,3 +49,29 @@ python scripts/run_mobilestereonet_inference.py \
 Output: `{output_dir}/{sequence}/{frame_stem}.npz` with key `"depth"` — float32 (H, W) in metres.  
 Interrupted runs resume automatically (existing frames are skipped).
 
+## TripoSR trial 
+
+### Setup
+
+```bash
+# Clone MobileStereoNet (no pip install needed)
+git clone https://github.com/VAST-AI-Research/TripoSR /usr/prakt/<user>/
+cd ../TripoSR
+pip install -r requirements.txt
+#follow troubleshooting in https://github.com/VAST-AI-Research/TripoSR
+```
+
+### Run
+
+```bash
+python run.py examples/chair.png --output-dir output/
+```
+
+after getting mesh of object, use scripts/pca.py for adding the mesh back into the point cloud of the world
+
+```bash
+#change back into root directory
+python scripts/pca.py
+```
+
+

@@ -17,6 +17,9 @@ tqdm>=4.65.0
 tensorboard>=2.13.0
 wandb>=0.15.0
 
+# Foundation models
+transformers>=4.38.0
+
 # Training & augmentation
 scikit-learn>=1.3.0
 albumentations>=1.3.0

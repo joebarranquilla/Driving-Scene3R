@@ -64,7 +64,7 @@ pip install -r requirements.txt
 ### Run
 
 ```bash
-python run.py examples/chair.png --output-dir output/
+python run.py ../Driving-Scene3R/isolated_car.jpg --output-dir output/
 ```
 
 after getting mesh of object, use scripts/pca.py for adding the mesh back into the point cloud of the world

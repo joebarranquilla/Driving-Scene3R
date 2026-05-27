@@ -142,9 +142,8 @@ def parse_kitti_calib(calib_path: str):
         P3: <12 values>   ← right colour  (image_3)
         Tr: <12 values>   ← lidar-to-camera transform
 
-    P2 = [f, 0, cx, 0,   0, f, cy, 0,   0, 0, 1, 0]
-    P3 = [f, 0, cx, -f·B, 0, f, cy, 0,  0, 0, 1, 0]
-    → baseline B = |P3[0,3]| / P3[0,0]
+    Stereo baseline: B = |P2[0,3] - P3[0,3]| / f
+    (The baseline is the difference in the x-translation terms of the two cameras.)
     """
     data = {}
     with open(calib_path, "r") as fh:
@@ -159,7 +158,7 @@ def parse_kitti_calib(calib_path: str):
     P3 = data["P3"].reshape(3, 4)
 
     focal_length = float(P2[0, 0])                          # pixels
-    baseline     = float(abs(P3[0, 3]) / P3[0, 0])         # metres
+    baseline     = float(abs(P2[0, 3] - P3[0, 3]) / focal_length)  # metres
 
     return focal_length, baseline
 

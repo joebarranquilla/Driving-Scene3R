@@ -46,7 +46,6 @@ Aggregation modes
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -55,119 +54,23 @@ from typing import Optional
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Cityscapes label definitions
+# Shared utilities
 # ---------------------------------------------------------------------------
 
-# (label_id, name, is_dynamic_vehicle, is_sky, cityscapes_rgb_colour)
-_CITYSCAPES_LABELS = [
-    (0,  "road",           False, False, (128,  64, 128)),
-    (1,  "sidewalk",       False, False, (244,  35, 232)),
-    (2,  "building",       False, False, ( 70,  70,  70)),
-    (3,  "wall",           False, False, (102, 102, 156)),
-    (4,  "fence",          False, False, (190, 153, 153)),
-    (5,  "pole",           False, False, (153, 153, 153)),
-    (6,  "traffic light",  False, False, (250, 170,  30)),
-    (7,  "traffic sign",   False, False, (220, 220,   0)),
-    (8,  "vegetation",     False, False, (107, 142,  35)),
-    (9,  "terrain",        False, False, (152, 251, 152)),
-    (10, "sky",            False, True,  ( 70, 130, 180)),  # ← excluded
-    (11, "person",         False, False, (220,  20,  60)),  # ← kept (static)
-    (12, "rider",          False, False, (255,   0,   0)),  # ← kept (static)
-    (13, "car",            True,  False, (  0,   0, 142)),  # ← excluded
-    (14, "truck",          True,  False, (  0,   0,  70)),  # ← excluded
-    (15, "bus",            True,  False, (  0,  60, 100)),  # ← excluded
-    (16, "train",          True,  False, (  0,  80, 100)),  # ← excluded
-    (17, "motorcycle",     True,  False, (  0,   0, 230)),  # ← excluded
-    (18, "bicycle",        True,  False, (119,  11,  32)),  # ← excluded
-]
-
-_ID_TO_COLOR  = {lid: np.array(col, dtype=np.float32) / 255.0
-                 for lid, _, _, _, col in _CITYSCAPES_LABELS}
-_EXCLUDED_IDS = frozenset(
-    lid for lid, _, is_dyn, is_sky, _ in _CITYSCAPES_LABELS
-    if is_dyn or is_sky
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils import (  # noqa: E402
+    CITYSCAPES_LABELS,
+    ID_TO_COLOR,
+    EXCLUDED_IDS,
+    build_label_exclusion_set,
+    semantic_boundary_mask,
+    parse_kitti_calib,
+    extract_intrinsics,
+    load_poses,
+    load_panoptic,
+    load_id2label,
+    save_ply,
 )
-
-
-def _build_label_exclusion_set(id2label: dict[int, str]) -> frozenset[int]:
-    """
-    Build the set of segment label IDs to exclude using the id2label mapping
-    written by the Mask2Former inference script.  Falls back to the hardcoded
-    Cityscapes IDs when label names are not found in the mapping.
-    """
-    name_to_default_excluded = {
-        name.lower()
-        for _, name, is_dyn, is_sky, _ in _CITYSCAPES_LABELS
-        if is_dyn or is_sky
-    }
-    excluded = set()
-    for lid_str, name in id2label.items():
-        if name.lower() in name_to_default_excluded:
-            excluded.add(int(lid_str))
-    # If the mapping gave no results, fall back to hardcoded IDs
-    return frozenset(excluded) if excluded else _EXCLUDED_IDS
-
-
-# ---------------------------------------------------------------------------
-# Calibration
-# ---------------------------------------------------------------------------
-
-def parse_calib(calib_path: str) -> dict[str, np.ndarray]:
-    """Parse a KITTI odometry calib.txt → dict of 3×4 projection matrices."""
-    data: dict[str, np.ndarray] = {}
-    with open(calib_path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            data[key.strip()] = np.fromstring(value, sep=" ", dtype=np.float64)
-    return data
-
-
-def extract_intrinsics(P: np.ndarray) -> tuple[float, float, float, float]:
-    """
-    Extract (fx, fy, cx, cy) from a KITTI 3×4 projection matrix.
-
-    The depth maps produced by MobileStereoNet are already in the cam2
-    coordinate frame, so we only need the upper-left 3×3 block (the
-    intrinsic matrix K) to back-project pixels.
-    """
-    P = P.reshape(3, 4)
-    return float(P[0, 0]), float(P[1, 1]), float(P[0, 2]), float(P[1, 2])
-
-
-# ---------------------------------------------------------------------------
-# Pose loading
-# ---------------------------------------------------------------------------
-
-def load_poses(poses_path: str) -> list[np.ndarray]:
-    """
-    Load KITTI odometry poses.txt.
-
-    Each line contains 12 space-separated values forming a 3×4 matrix
-    [R | t] that transforms a point from the **camera frame** to the
-    **world frame**::
-
-        P_world = R @ P_cam + t
-
-    Returns a list of 4×4 homogeneous transformation matrices (float64).
-    """
-    poses = []
-    with open(poses_path) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            vals = np.fromstring(line, sep=" ", dtype=np.float64)
-            if vals.size != 12:
-                raise ValueError(
-                    f"Expected 12 values per pose line, got {vals.size} in {poses_path}"
-                )
-            T = np.eye(4, dtype=np.float64)
-            T[:3, :] = vals.reshape(3, 4)
-            poses.append(T)
-    return poses
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +88,7 @@ def backproject_frame(
     pose: np.ndarray,           # (4, 4) camera-to-world transform
     depth_trunc: float,
     rgb: Optional[np.ndarray] = None,  # (H, W, 3) float32 [0-1] or None
+    boundary_margin: int = 0,   # pixels to erode around semantic boundaries
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Back-project a single frame into world-space 3D points.
@@ -209,6 +113,11 @@ def backproject_frame(
     keep_mask = np.ones((H, W), dtype=bool)
     for excl_id in excluded_label_ids:
         keep_mask &= (label_map != excl_id)
+
+    # Discard pixels near semantic boundaries (depth-bleeding artefacts)
+    if boundary_margin > 0:
+        boundary_zone = semantic_boundary_mask(label_map, boundary_margin)
+        keep_mask &= ~boundary_zone
 
     # Also discard void (panoptic_seg == 0) and invalid / truncated depth
     keep_mask &= (panoptic_seg != 0)
@@ -396,37 +305,6 @@ def aggregate_icp(
 
 
 # ---------------------------------------------------------------------------
-# PLY writer
-# ---------------------------------------------------------------------------
-
-def save_ply(
-    path: str,
-    xyz: np.ndarray,      # (N, 3) float32
-    colors: np.ndarray,   # (N, 3) float32 [0-1]
-    labels: np.ndarray,   # (N,)   int32
-) -> None:
-    """
-    Write a coloured PLY with an extra scalar property ``label`` so that
-    tools like CloudCompare can colour-by-scalar after loading.
-    """
-    N = len(xyz)
-    cols_u8 = (np.clip(colors, 0.0, 1.0) * 255).astype(np.uint8)
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w") as fh:
-        fh.write(
-            f"ply\nformat ascii 1.0\n"
-            f"element vertex {N}\n"
-            "property float x\nproperty float y\nproperty float z\n"
-            "property uchar red\nproperty uchar green\nproperty uchar blue\n"
-            "property int label\n"
-            "end_header\n"
-        )
-        for (x, y, z), (r, g, b), lbl in zip(xyz, cols_u8, labels):
-            fh.write(f"{x:.4f} {y:.4f} {z:.4f} {r} {g} {b} {lbl}\n")
-    print(f"[✓] Saved PLY  → {path}  ({N:,} points)")
-
-
-# ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
 
@@ -536,6 +414,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--boundary_margin", type=int, default=5,
+        help=(
+            "Erosion margin in pixels applied around every semantic class boundary "
+            "before back-projection.  Pixels within this band are discarded because "
+            "stereo aggregation kernels blend depth evidence across classes, producing "
+            "floating artefacts in the cloud.  Set to 0 to disable (legacy behaviour)."
+        ),
+    )
+    p.add_argument(
         "--no_cuda", action="store_true",
         help="Unused; kept for CLI consistency with other scripts.",
     )
@@ -571,7 +458,7 @@ def main() -> None:
             sys.exit(f"[error] {label} not found: {path}")
 
     # ---- Calibration ---------------------------------------------------------
-    calib = parse_calib(str(calib_path))
+    calib = parse_kitti_calib(str(calib_path))
     if "P2" not in calib:
         sys.exit("[error] P2 not found in calib.txt – expected KITTI odometry format.")
     fx, fy, cx, cy = extract_intrinsics(calib["P2"])
@@ -584,17 +471,15 @@ def main() -> None:
     # ---- Label exclusion set -------------------------------------------------
     id2label: dict[int, str] = {}
     if id2label_path.exists():
-        with open(id2label_path) as fh:
-            id2label = {int(k): v for k, v in json.load(fh).items()}
+        id2label = load_id2label(str(id2label_path))
         print(f"[i] Loaded id2label mapping ({len(id2label)} classes) from {id2label_path}")
     else:
         print(f"[warn] id2label.json not found at {id2label_path}; "
               "using hardcoded Cityscapes class IDs for exclusion.")
 
-    excluded = _build_label_exclusion_set({str(k): v for k, v in id2label.items()}) \
-        if id2label else _EXCLUDED_IDS
+    excluded = build_label_exclusion_set(id2label) if id2label else EXCLUDED_IDS
 
-    excluded_names = [name for lid, name, _, _, _ in _CITYSCAPES_LABELS
+    excluded_names = [name for lid, name, _, _, _ in CITYSCAPES_LABELS
                       if lid in excluded]
     print(f"[i] Excluding classes: {excluded_names}")
 
@@ -632,10 +517,10 @@ def main() -> None:
         depth = depth_npz["depth"].astype(np.float32)
 
         # Load panoptic
-        pan_npz      = np.load(str(panoptic_path))
-        panoptic_seg = pan_npz["panoptic_seg"].astype(np.int32)
-        segment_ids  = pan_npz["segment_ids"].astype(np.int32)
-        label_ids    = pan_npz["label_ids"].astype(np.int32)
+        pan = load_panoptic(str(panoptic_path))
+        panoptic_seg = pan["panoptic_seg"].astype(np.int32)
+        segment_ids  = pan["segment_ids"].astype(np.int32)
+        label_ids    = pan["label_ids"].astype(np.int32)
 
         # Sanity-check spatial alignment between depth and panoptic
         if depth.shape != panoptic_seg.shape:
@@ -669,11 +554,12 @@ def main() -> None:
             segment_ids=segment_ids,
             label_ids=label_ids,
             excluded_label_ids=excluded,
-            id_to_color=_ID_TO_COLOR,
+            id_to_color=ID_TO_COLOR,
             fx=fx, fy=fy, cx=cx, cy=cy,
             pose=pose,
             depth_trunc=args.depth_trunc,
             rgb=rgb,
+            boundary_margin=args.boundary_margin,
         )
 
         print(f"  frame {stem}: {len(xyz):>8,} pts kept "
@@ -723,7 +609,7 @@ def main() -> None:
 
     # ---- Per-class point counts (diagnostics) --------------------------------
     print("\n[i] Points per semantic class in final cloud:")
-    label_to_name = {lid: name for lid, name, _, _, _ in _CITYSCAPES_LABELS}
+    label_to_name = {lid: name for lid, name, _, _, _ in CITYSCAPES_LABELS}
     if id2label:
         label_to_name.update(id2label)
     unique_labels, counts = np.unique(labels_final, return_counts=True)

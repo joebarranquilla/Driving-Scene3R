@@ -10,7 +10,12 @@ Usage:
     python rgbd_to_pointcloud.py                         # generates synthetic demo data
     python rgbd_to_pointcloud.py --rgb rgb.png --depth depth.png
 """
+import sys
+import os
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils import parse_kitti_calib, extract_intrinsics, save_ply  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Core conversion
@@ -128,43 +133,12 @@ def _load_depth_npz(path: str) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Visualisation (Open3D)
-# ---------------------------------------------------------------------------
-
-def save_ply(points: np.ndarray, colors: np.ndarray, path: str = "output.ply") -> None:
-        N = len(points)
-        cols_u8 = (colors * 255).clip(0, 255).astype(np.uint8)
-        with open(path, "w") as f:
-            f.write(
-                f"ply\nformat ascii 1.0\nelement vertex {N}\n"
-                "property float x\nproperty float y\nproperty float z\n"
-                "property uchar red\nproperty uchar green\nproperty uchar blue\n"
-                "end_header\n"
-            )
-            for (x, y, z), (r, g, b) in zip(points, cols_u8):
-                f.write(f"{x:.4f} {y:.4f} {z:.4f} {r} {g} {b}\n")
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-import numpy as np
-
-def parse_kitti_calib(path):
-    calib = {}
-    with open(path) as f:
-        for line in f:
-            key, *vals = line.split()
-            calib[key.rstrip(':')] = np.array(vals, dtype=np.float32).reshape(3, 4)
-    return calib
-
 def main():
     calib = parse_kitti_calib("../calib.txt")
-
-    P2 = calib["P2"]      
-    fx, fy = P2[0, 0], P2[1, 1]
-    cx, cy = P2[0, 2], P2[1, 2]
+    fx, fy, cx, cy = extract_intrinsics(calib["P2"])
 
     rgb   = load_rgb("../000000.png")
     depth = load_depth("../000000.npz")
@@ -177,7 +151,7 @@ def main():
         depth_trunc=80.0,
     )
 
-    save_ply(points, colors, "../output.ply")
+    save_ply("../output.ply", points, colors)
 
 if __name__ == "__main__":
     main()

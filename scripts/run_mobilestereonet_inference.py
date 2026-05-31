@@ -48,6 +48,9 @@ import torchvision.transforms as transforms
 from PIL import Image
 from tqdm import tqdm
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils import focal_and_baseline  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -124,43 +127,6 @@ def parse_args():
     )
 
     return parser.parse_args()
-
-
-# ---------------------------------------------------------------------------
-# KITTI calibration parsing
-# ---------------------------------------------------------------------------
-
-def parse_kitti_calib(calib_path: str):
-    """
-    Parse a KITTI odometry calib.txt file and return the focal length (px)
-    and stereo baseline (m) for the colour stereo pair (cameras 2 and 3).
-
-    calib.txt format (space-separated 3×4 matrix rows):
-        P0: <12 values>   ← left  greyscale
-        P1: <12 values>   ← right greyscale
-        P2: <12 values>   ← left  colour  (image_2)
-        P3: <12 values>   ← right colour  (image_3)
-        Tr: <12 values>   ← lidar-to-camera transform
-
-    Stereo baseline: B = |P2[0,3] - P3[0,3]| / f
-    (The baseline is the difference in the x-translation terms of the two cameras.)
-    """
-    data = {}
-    with open(calib_path, "r") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            data[key.strip()] = np.fromstring(value, sep=" ", dtype=np.float64)
-
-    P2 = data["P2"].reshape(3, 4)
-    P3 = data["P3"].reshape(3, 4)
-
-    focal_length = float(P2[0, 0])                          # pixels
-    baseline     = float(abs(P2[0, 3] - P3[0, 3]) / focal_length)  # metres
-
-    return focal_length, baseline
 
 
 # ---------------------------------------------------------------------------
@@ -335,7 +301,7 @@ def process_sequence(
         if not os.path.exists(p):
             raise FileNotFoundError(f"Required path not found: {p}")
 
-    focal_length, baseline = parse_kitti_calib(calib_txt)
+    focal_length, baseline = focal_and_baseline(calib_txt)
     print(f"  Calibration  →  f = {focal_length:.2f} px,  B = {baseline:.4f} m")
 
     frame_pairs = collect_frames(left_dir, right_dir)

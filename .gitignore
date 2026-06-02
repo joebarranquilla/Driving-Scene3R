@@ -31,6 +31,7 @@ checkpoints/
 *.pt
 *.pth
 results/
+runs/
 test/
 
 # Packaging
@@ -40,3 +41,7 @@ build/
 
 # Testing
 .pytest_cache/
+
+# Claude Code
+.claude/
+CLAUDE.md

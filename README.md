@@ -75,6 +75,40 @@ A `{output_dir}/id2label.json` mapping label IDs to class names is written once.
 
 Interrupted runs resume automatically (existing frames are skipped).
 
+## SAM 3 instance segmentation
+
+See `scripts/run_sam3_inference.py` for full documentation and all CLI options.
+
+### Setup
+
+No repo clone needed — SAM 3 is included in the `ultralytics` package. Install the required CLIP dependency:
+
+```bash
+pip install git+https://github.com/ultralytics/CLIP.git
+```
+
+The `sam3.pt` checkpoint (~3.3 GB) is from [facebook/sam3](https://huggingface.co/facebook/sam3) on HuggingFace. A copy is already available on the shared cluster filesystem — ask a team member for the path.
+
+### Run
+
+```bash
+python scripts/run_sam3_inference.py \
+    --dataset_root /storage/.../dataset/sequences \
+    --sequences    00 01 02 \
+    --checkpoint   /usr/prakt/<user>/checkpoints/sam3/sam3.pt \
+    --output_dir   /usr/prakt/<user>/sam3_predictions
+```
+
+The default concepts are `car`, `pedestrian`, `cyclist`. Override with `--concepts car truck pedestrian cyclist` etc.
+
+Output: `{output_dir}/{sequence}/{frame_stem}.npz` with keys:
+- `"instance_seg"` — int32 (H, W), persistent track ID per pixel (0 = background)
+- `"track_ids"` / `"label_ids"` / `"scores"` — 1-D arrays, one entry per instance
+
+`label_ids` indexes into `{output_dir}/concepts.json` (written once), which maps each index to its concept name.
+
+Unlike Mask2Former, the same object keeps the same `track_id` across all frames in a sequence, enabling downstream temporal accumulation. Interrupted runs resume automatically at the sequence level (tracking is stateful, so a partially-processed sequence reruns from frame 0).
+
 ## TripoSR trial 
 
 ### Setup

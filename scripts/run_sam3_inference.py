@@ -99,6 +99,7 @@ def _build_predictor(checkpoint: str, conf: float, device):
         device  = device,
         conf    = conf,
         verbose = False,
+        save    = False,
     ))
     return predictor
 
@@ -164,7 +165,15 @@ def parse_args():
     )
     parser.add_argument(
         "--no_visualise", action="store_true",
-        help="Disable saving rendered JPG visualisations alongside each NPZ.",
+        help="Disable saving per-frame JPG visualisations alongside each NPZ.",
+    )
+    parser.add_argument(
+        "--no_make_video", action="store_true",
+        help="Disable stitching rendered frames into a per-sequence MP4.",
+    )
+    parser.add_argument(
+        "--fps", type=float, default=10.0,
+        help="Frame rate for the output video.",
     )
     return parser.parse_args()
 
@@ -247,16 +256,16 @@ _VIS_PALETTE = [
 ]
 
 
-def render_visualisation(
+def render_frame(
     image_path: str,
     inst_seg: np.ndarray,     # int32 (H, W)
     track_ids: np.ndarray,    # int32 (N,)
     label_ids: np.ndarray,    # int32 (N,)
     scores: np.ndarray,       # float32 (N,)
     concepts: list[str],
-    out_path: str,
     alpha: float = 0.45,
-) -> None:
+) -> np.ndarray:
+    """Render instance masks onto the image. Returns uint8 RGB array (H, W, 3)."""
     from PIL import Image, ImageDraw
 
     img = np.array(Image.open(image_path).convert("RGB"), dtype=np.float32)
@@ -268,22 +277,21 @@ def render_visualisation(
         for c in range(3):
             out[:, :, c][mask] = alpha * colour[c] + (1 - alpha) * img[:, :, c][mask]
 
-    vis = Image.fromarray(out.astype(np.uint8))
+    vis  = Image.fromarray(out.astype(np.uint8))
     draw = ImageDraw.Draw(vis)
 
     for tid, lid, score in zip(track_ids, label_ids, scores):
-        mask = inst_seg == int(tid)
+        mask = inst_seg == (int(tid) + 1)
         ys, xs = np.where(mask)
         if len(xs) == 0:
             continue
         x, y   = int(xs.mean()), max(int(ys.min()) - 12, 0)
         colour = _VIS_PALETTE[int(tid) % len(_VIS_PALETTE)]
         label  = f"{concepts[int(lid)]} #{tid} {score:.2f}"
-        # thin dark shadow for readability on any background
         draw.text((x + 1, y + 1), label, fill=(0, 0, 0))
         draw.text((x,     y    ), label, fill=colour)
 
-    vis.save(out_path, quality=92)
+    return np.array(vis)
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +307,8 @@ def process_sequence(
     conf: float,
     image_subdir: str,
     visualise: bool = True,
+    make_video: bool = True,
+    fps: float = 10.0,
 ) -> None:
     seq_dir   = os.path.join(dataset_root, seq_id)
     image_dir = os.path.join(seq_dir, image_subdir)
@@ -325,6 +335,20 @@ def process_sequence(
         )
 
     tqdm.write(f"  Frames: {len(frame_paths)}  |  concepts: {concepts}\n")
+
+    # Initialise video writer before the frame loop
+    video_writer = None
+    if make_video:
+        import cv2
+        from PIL import Image as _PIL
+        h_vid, w_vid = _PIL.open(frame_paths[0]).size[::-1]  # (H, W)
+        video_path   = os.path.join(out_seq_dir, f"{seq_id}.mp4")
+        video_writer = cv2.VideoWriter(
+            video_path,
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (w_vid, h_vid),
+        )
 
     # Reset tracking state between sequences
     predictor.inference_state = {}
@@ -374,16 +398,27 @@ def process_sequence(
             scores       = scores,
         )
 
-        if visualise:
-            render_visualisation(
+        if visualise or make_video:
+            frame_rgb = render_frame(
                 image_path = fp,
                 inst_seg   = inst_seg,
                 track_ids  = track_ids,
                 label_ids  = label_ids,
                 scores     = scores,
                 concepts   = concepts,
-                out_path   = os.path.join(out_seq_dir, f"{stem}.jpg"),
             )
+            if visualise:
+                from PIL import Image as _PIL
+                _PIL.fromarray(frame_rgb).save(
+                    os.path.join(out_seq_dir, f"{stem}.jpg"), quality=92
+                )
+            if make_video and video_writer is not None:
+                import cv2 as _cv2
+                video_writer.write(_cv2.cvtColor(frame_rgb, _cv2.COLOR_RGB2BGR))
+
+    if video_writer is not None:
+        video_writer.release()
+        tqdm.write(f"  Video saved: {video_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +462,8 @@ def main():
             conf         = args.conf,
             image_subdir = args.image_subdir,
             visualise    = not args.no_visualise,
+            make_video   = not args.no_make_video,
+            fps          = args.fps,
         )
 
     print(f"\nAll sequences done. Results written to: {args.output_dir}")

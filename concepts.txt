@@ -4,4 +4,3 @@
 car
 pedestrian
 cyclist
-tree

@@ -1,0 +1,7 @@
+# SAM 3 concept prompts — one per line, order defines label_id (0, 1, 2, …)
+# Lines starting with '#' and blank lines are ignored.
+
+car
+pedestrian
+cyclist
+tree

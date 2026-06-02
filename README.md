@@ -92,18 +92,22 @@ The `sam3.pt` checkpoint (~3.3 GB) is from [facebook/sam3](https://huggingface.c
 ### Run
 
 ```bash
-python scripts/run_sam3_inference.py \
-    --dataset_root /storage/.../dataset/sequences \
-    --sequences    00 01 02 \
-    --checkpoint   /usr/prakt/<user>/checkpoints/sam3/sam3.pt \
-    --output_dir   /usr/prakt/<user>/sam3_predictions
+python scripts/run_sam3_inference.py --sequences 00 01 02
 ```
 
-The default concepts are `car`, `pedestrian`, `cyclist`. Override with `--concepts car truck pedestrian cyclist` etc.
+All paths (dataset root, checkpoint, output directory) default to the project's cluster paths. Override only when needed:
+
+```bash
+python scripts/run_sam3_inference.py --sequences 00 --output_dir /tmp/test
+```
+
+Concepts default to those listed in `concepts.txt` in the repo root (`car`, `pedestrian`, `cyclist`). Edit that file to change them, or pass `--concepts car truck pedestrian` to override on the fly.
 
 Output: `{output_dir}/{sequence}/{frame_stem}.npz` with keys:
-- `"instance_seg"` — int32 (H, W), persistent track ID per pixel (0 = background)
+- `"instance_seg"` — int32 (H, W), `(track_id + 1)` per pixel (0 = background)
 - `"track_ids"` / `"label_ids"` / `"scores"` — 1-D arrays, one entry per instance
+
+`instance_seg` stores `track_id + 1` (not raw track IDs) to avoid ambiguity between background (0) and the first tracked object (also ID 0). To find track N's pixels: `instance_seg == N + 1`.
 
 `label_ids` indexes into `{output_dir}/concepts.json` (written once), which maps each index to its concept name.
 

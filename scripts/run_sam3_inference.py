@@ -9,7 +9,7 @@ which is what the downstream temporal-accumulation stage requires.
 
 Output per frame:
     {output_dir}/{sequence}/{frame_stem}.npz
-        "instance_seg"  → int32   (H, W)   track_id per pixel (0 = background)
+        "instance_seg"  → int32   (H, W)   (track_id + 1) per pixel (0 = background)
         "track_ids"     → int32   (N,)     persistent tracking IDs this frame
         "label_ids"     → int32   (N,)     class index matching --concepts order
         "scores"        → float32 (N,)     detection confidence per instance
@@ -22,12 +22,11 @@ sequence must be rerun from the beginning to keep ID continuity.
 
 Usage
 -----
-python scripts/run_sam3_inference.py \\
-    --dataset_root /storage/group/dataset_mirrors/kitti_odom_color/ \\
-data_odometry_color/dataset/sequences \\
-    --sequences    00 01 \\
-    --checkpoint   /usr/prakt/s0044/checkpoints/sam3/sam3.pt \\
-    --output_dir   /usr/prakt/s0044/sam3_predictions
+python scripts/run_sam3_inference.py --sequences 00 01
+
+All paths (dataset_root, checkpoint, output_dir) have project defaults.
+Override only when needed, e.g.:
+    python scripts/run_sam3_inference.py --sequences 00 --output_dir /tmp/test
 
 Slurm (long sequences)
 ----------------------
@@ -114,7 +113,8 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--dataset_root", required=True,
+        "--dataset_root",
+        default="/storage/group/dataset_mirrors/kitti_odom_color/data_odometry_color/dataset/sequences",
         help="Root directory that contains numbered KITTI sequence folders.",
     )
     parser.add_argument(
@@ -133,11 +133,25 @@ def parse_args():
     )
     parser.add_argument(
         "--concepts", nargs="+",
-        default=["car", "pedestrian", "cyclist"],
-        help="Text concept prompts — defines the label_id order (0, 1, 2, …).",
+        default=None,
+        help=(
+            "Text concept prompts, e.g. --concepts car pedestrian cyclist. "
+            "Overrides --concepts_file when both are given."
+        ),
     )
     parser.add_argument(
-        "--conf", type=float, default=0.25,
+        "--concepts_file",
+        default=None,
+        help=(
+            "Path to a plain-text file listing one concept per line. "
+            "Lines starting with '#' and blank lines are ignored. "
+            "If neither --concepts nor --concepts_file is given, "
+            "defaults to 'concepts.txt' in the repo root if it exists, "
+            "otherwise falls back to: car, pedestrian, cyclist."
+        ),
+    )
+    parser.add_argument(
+        "--conf", type=float, default=0.5,
         help="Minimum detection confidence threshold.",
     )
     parser.add_argument(
@@ -148,7 +162,48 @@ def parse_args():
         "--no_cuda", action="store_true",
         help="Disable CUDA and run on CPU (very slow for full sequences).",
     )
+    parser.add_argument(
+        "--no_visualise", action="store_true",
+        help="Disable saving rendered JPG visualisations alongside each NPZ.",
+    )
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Concept loading
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CONCEPTS = ["car", "pedestrian", "cyclist"]
+_DEFAULT_CONCEPTS_FILE = os.path.join(os.path.dirname(__file__), "..", "concepts.txt")
+
+
+def load_concepts(args) -> list[str]:
+    """Resolve the concept list from CLI args, a file, or built-in defaults.
+
+    Priority: --concepts > --concepts_file > concepts.txt in repo root > built-in defaults.
+    """
+    if args.concepts:
+        return args.concepts
+
+    path = args.concepts_file or (
+        _DEFAULT_CONCEPTS_FILE if os.path.exists(_DEFAULT_CONCEPTS_FILE) else None
+    )
+
+    if path:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Concepts file not found: {path}")
+        concepts = [
+            line.strip()
+            for line in open(path)
+            if line.strip() and not line.startswith("#")
+        ]
+        if not concepts:
+            raise ValueError(f"Concepts file is empty or has only comments: {path}")
+        print(f"Concepts loaded from: {path}")
+        return concepts
+
+    print(f"Using default concepts: {_DEFAULT_CONCEPTS}")
+    return _DEFAULT_CONCEPTS
 
 
 # ---------------------------------------------------------------------------
@@ -174,8 +229,61 @@ def build_instance_seg(
     """
     seg = np.zeros((masks.shape[1], masks.shape[2]), dtype=np.int32)
     for mask, tid in zip(masks, track_ids):
-        seg[mask] = int(tid)
+        seg[mask] = int(tid) + 1  # +1 so background=0 is never confused with track_id=0
     return seg
+
+
+# ---------------------------------------------------------------------------
+# Visualisation
+# ---------------------------------------------------------------------------
+
+# Distinct colours for up to 20 simultaneous instances (cycles if more)
+_VIS_PALETTE = [
+    (255,  60,  60), ( 60, 180,  60), ( 60,  60, 255), (255, 200,   0),
+    (  0, 210, 210), (200,   0, 200), (255, 130,   0), (130,   0, 255),
+    (  0, 160, 255), (255,   0, 130), (  0, 220, 130), (180, 255,   0),
+    (180, 100,  60), ( 60, 180, 180), (255, 180, 180), (180, 255, 180),
+    (180, 180, 255), (255, 255, 130), (130, 255, 255), (255, 130, 255),
+]
+
+
+def render_visualisation(
+    image_path: str,
+    inst_seg: np.ndarray,     # int32 (H, W)
+    track_ids: np.ndarray,    # int32 (N,)
+    label_ids: np.ndarray,    # int32 (N,)
+    scores: np.ndarray,       # float32 (N,)
+    concepts: list[str],
+    out_path: str,
+    alpha: float = 0.45,
+) -> None:
+    from PIL import Image, ImageDraw
+
+    img = np.array(Image.open(image_path).convert("RGB"), dtype=np.float32)
+    out = img.copy()
+
+    for tid, lid in zip(track_ids, label_ids):
+        colour = _VIS_PALETTE[int(tid) % len(_VIS_PALETTE)]
+        mask   = inst_seg == (int(tid) + 1)  # inst_seg stores tid+1; 0 is background
+        for c in range(3):
+            out[:, :, c][mask] = alpha * colour[c] + (1 - alpha) * img[:, :, c][mask]
+
+    vis = Image.fromarray(out.astype(np.uint8))
+    draw = ImageDraw.Draw(vis)
+
+    for tid, lid, score in zip(track_ids, label_ids, scores):
+        mask = inst_seg == int(tid)
+        ys, xs = np.where(mask)
+        if len(xs) == 0:
+            continue
+        x, y   = int(xs.mean()), max(int(ys.min()) - 12, 0)
+        colour = _VIS_PALETTE[int(tid) % len(_VIS_PALETTE)]
+        label  = f"{concepts[int(lid)]} #{tid} {score:.2f}"
+        # thin dark shadow for readability on any background
+        draw.text((x + 1, y + 1), label, fill=(0, 0, 0))
+        draw.text((x,     y    ), label, fill=colour)
+
+    vis.save(out_path, quality=92)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +298,7 @@ def process_sequence(
     concepts: list[str],
     conf: float,
     image_subdir: str,
+    visualise: bool = True,
 ) -> None:
     seq_dir   = os.path.join(dataset_root, seq_id)
     image_dir = os.path.join(seq_dir, image_subdir)
@@ -219,12 +328,10 @@ def process_sequence(
 
     # Reset tracking state between sequences
     predictor.inference_state = {}
-
     results_iter = predictor(
         source=image_dir,
         text=concepts,
         stream=True,
-        conf=conf,
     )
 
     for fp, result in tqdm(
@@ -241,11 +348,11 @@ def process_sequence(
             masks_np  = result.masks.data.cpu().numpy().astype(bool)   # (N, H, W)
             boxes_np  = result.boxes.data.cpu().numpy()                # (N, 7)
             # boxes columns: x1 y1 x2 y2 track_id score cls
-            track_ids = boxes_np[:, 4].astype(np.int32)
-            scores    = boxes_np[:, 5].astype(np.float32)
-            label_ids = boxes_np[:, 6].astype(np.int32)
-            inst_seg  = build_instance_seg(masks_np, track_ids)
-        else:
+            keep     = boxes_np[:, 5] >= conf
+            masks_np = masks_np[keep]
+            boxes_np = boxes_np[keep]
+
+        if result.masks is None or len(result.masks) == 0 or len(boxes_np) == 0:
             from PIL import Image
             with Image.open(fp) as img:
                 h, w = img.height, img.width
@@ -253,6 +360,11 @@ def process_sequence(
             track_ids = np.array([], dtype=np.int32)
             label_ids = np.array([], dtype=np.int32)
             scores    = np.array([], dtype=np.float32)
+        else:
+            track_ids = boxes_np[:, 4].astype(np.int32)
+            scores    = boxes_np[:, 5].astype(np.float32)
+            label_ids = boxes_np[:, 6].astype(np.int32)
+            inst_seg  = build_instance_seg(masks_np, track_ids)
 
         np.savez_compressed(
             out_path,
@@ -262,6 +374,17 @@ def process_sequence(
             scores       = scores,
         )
 
+        if visualise:
+            render_visualisation(
+                image_path = fp,
+                inst_seg   = inst_seg,
+                track_ids  = track_ids,
+                label_ids  = label_ids,
+                scores     = scores,
+                concepts   = concepts,
+                out_path   = os.path.join(out_seq_dir, f"{stem}.jpg"),
+            )
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -269,6 +392,7 @@ def process_sequence(
 
 def main():
     args = parse_args()
+    concepts = load_concepts(args)
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     device   = 0 if use_cuda else "cpu"
@@ -287,7 +411,7 @@ def main():
     concept_map_path = os.path.join(args.output_dir, "concepts.json")
     if not os.path.exists(concept_map_path):
         with open(concept_map_path, "w") as fh:
-            json.dump({str(i): c for i, c in enumerate(args.concepts)}, fh, indent=2)
+            json.dump({str(i): c for i, c in enumerate(concepts)}, fh, indent=2)
         print(f"Concept map saved: {concept_map_path}\n")
 
     for seq_id in args.sequences:
@@ -299,9 +423,10 @@ def main():
             dataset_root = args.dataset_root,
             output_dir   = args.output_dir,
             predictor    = predictor,
-            concepts     = args.concepts,
+            concepts     = concepts,
             conf         = args.conf,
             image_subdir = args.image_subdir,
+            visualise    = not args.no_visualise,
         )
 
     print(f"\nAll sequences done. Results written to: {args.output_dir}")

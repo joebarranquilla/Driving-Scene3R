@@ -152,6 +152,87 @@ def backproject_frame(
     return xyz_world.astype(np.float32), colors.astype(np.float32), labels_flat
 
 
+def extract_dynamic_segments(
+    depth: np.ndarray,
+    panoptic_seg: np.ndarray,
+    segment_ids: np.ndarray,
+    label_ids: np.ndarray,
+    excluded_label_ids: frozenset[int],
+    id_to_color: dict[int, np.ndarray],
+    fx: float, fy: float, cx: float, cy: float,
+    pose: np.ndarray,
+    depth_trunc: float,
+    rgb: Optional[np.ndarray] = None,
+    boundary_margin: int = 0,
+) -> list[tuple[int, int, np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    Extract per-segment point clouds for segments whose semantic label is in
+    `excluded_label_ids` (i.e. dynamic classes). Returns a list of tuples:
+    (segment_id, label_id, xyz_world, colors, labels_array).
+    """
+    H, W = depth.shape
+
+    # Map: segment_id -> label_id
+    seg2label = dict(zip(segment_ids.tolist(), label_ids.tolist()))
+
+    # Build a per-pixel semantic label map (used for boundary erosion)
+    label_map = np.zeros((H, W), dtype=np.int32)
+    for seg_id, lab_id in seg2label.items():
+        label_map[panoptic_seg == seg_id] = lab_id
+
+    # Precompute boundary zone if requested
+    if boundary_margin > 0:
+        boundary_zone = semantic_boundary_mask(label_map, boundary_margin)
+    else:
+        boundary_zone = np.zeros((H, W), dtype=bool)
+
+    # Precompute camera-frame coordinates
+    u_grid, v_grid = np.meshgrid(np.arange(W), np.arange(H))
+    Z_all = depth
+    R = pose[:3, :3]
+    t = pose[:3, 3]
+
+    dynamic_clouds: list[tuple[int, int, np.ndarray, np.ndarray, np.ndarray]] = []
+
+    for seg_id in segment_ids.tolist():
+        lab_id = int(seg2label.get(seg_id, 0))
+        if lab_id not in excluded_label_ids:
+            continue
+
+        mask = (panoptic_seg == seg_id)
+        if boundary_margin > 0:
+            mask &= ~boundary_zone
+        mask &= (Z_all > 0.0) & (Z_all < depth_trunc) & np.isfinite(Z_all)
+
+        if not mask.any():
+            continue
+
+        Z = Z_all[mask]
+        u = u_grid[mask]
+        v = v_grid[mask]
+        X = (u - cx) * Z / fx
+        Y = (v - cy) * Z / fy
+
+        xyz_cam = np.stack([X, Y, Z], axis=-1)
+        xyz_world = (R @ xyz_cam.T).T + t
+
+        if rgb is not None:
+            colors = rgb[mask]
+        else:
+            colors = np.zeros((len(Z), 3), dtype=np.float32)
+            for lid, col in id_to_color.items():
+                if lid == lab_id:
+                    colors[:] = col
+                    break
+
+        labels_arr = np.full((len(Z),), lab_id, dtype=np.int32)
+
+        dynamic_clouds.append((int(seg_id), lab_id, xyz_world.astype(np.float32),
+                               colors.astype(np.float32), labels_arr))
+
+    return dynamic_clouds
+
+
 # ---------------------------------------------------------------------------
 # Aggregation strategies
 # ---------------------------------------------------------------------------
@@ -498,6 +579,11 @@ def main() -> None:
 
     # ---- Per-frame processing ------------------------------------------------
     clouds: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    # Directory to save dynamic object clouds (per-segment)
+    dynamic_out_dir = Path(args.output).parent / (Path(args.output).stem + "_dynamic")
+    dynamic_out_dir.mkdir(parents=True, exist_ok=True)
+    # Track which dynamic segment IDs we've already saved (avoid duplicates)
+    saved_dynamic_ids: set[int] = set()
 
     for frame_idx in frame_indices:
         stem = f"{frame_idx:06d}"
@@ -547,6 +633,42 @@ def main() -> None:
                       "falling back to semantic colours.")
 
         pose = all_poses[frame_idx]
+
+        # --- Extract dynamic object segments for this frame and save them ---
+        dyn_segments = extract_dynamic_segments(
+            depth=depth,
+            panoptic_seg=panoptic_seg,
+            segment_ids=segment_ids,
+            label_ids=label_ids,
+            excluded_label_ids=excluded,
+            id_to_color=ID_TO_COLOR,
+            fx=fx, fy=fy, cx=cx, cy=cy,
+            pose=pose,
+            depth_trunc=args.depth_trunc,
+            rgb=rgb,
+            boundary_margin=args.boundary_margin,
+        )
+
+        for seg_id, lab_id, xyz_seg, colors_seg, labels_seg in dyn_segments:
+            # Derive a human-friendly label name
+            lbl_name = id2label.get(int(lab_id)) if id2label else None
+            if lbl_name is None:
+                lbl_name = next((n for lid, n, *_ in CITYSCAPES_LABELS if lid == lab_id),
+                                f"class_{lab_id}")
+            safe_name = lbl_name.replace(" ", "_")
+            out_name = f"{seq}_{stem}_seg{seg_id:06d}_{safe_name}.ply"
+            out_path = dynamic_out_dir / out_name
+            # Skip if we've already saved this segment ID in a previous frame
+            if seg_id in saved_dynamic_ids:
+                print(f"  [dyn] skip segment {seg_id} ({lbl_name}) — already saved")
+                continue
+
+            save_ply(str(out_path), xyz_seg, colors_seg, labels_seg)
+            if args.save_npz:
+                npz_path = str(out_path).replace(".ply", "") + ".npz"
+                np.savez_compressed(npz_path, xyz=xyz_seg, colors=colors_seg, labels=labels_seg)
+            saved_dynamic_ids.add(seg_id)
+            print(f"  [dyn] saved segment {seg_id} ({lbl_name}) -> {out_path}")
 
         xyz, colors, labels = backproject_frame(
             depth=depth,

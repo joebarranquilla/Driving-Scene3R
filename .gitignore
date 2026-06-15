@@ -40,3 +40,11 @@ build/
 
 # Testing
 .pytest_cache/
+
+# --- semantic_gs module additions ------------------------------------------
+# The generic `data/` rule above otherwise hides our package's data subpackage.
+!semantic_gs/data/
+!semantic_gs/data/**
+
+# Phase 0 smoke-test artefacts (regenerable; never commit).
+smoke_test_out/

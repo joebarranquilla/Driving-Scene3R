@@ -124,8 +124,8 @@ def parse_args():
     )
     parser.add_argument(
         "--checkpoint",
-        default="/usr/prakt/s0044/checkpoints/sam3/sam3.pt",
-        help="Path to SAM 3 checkpoint (.pt).",
+        default=os.path.expanduser("~/checkpoints/sam3/sam3.pt"),
+        help="Path to the SAM 3 model weights file (.pt). Default: ~/checkpoints/sam3/sam3.pt",
     )
     parser.add_argument(
         "--output_dir",

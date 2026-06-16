@@ -87,7 +87,18 @@ No repo clone needed — SAM 3 is included in the `ultralytics` package. Install
 pip install git+https://github.com/ultralytics/CLIP.git
 ```
 
-The `sam3.pt` checkpoint (~3.3 GB) is from [facebook/sam3](https://huggingface.co/facebook/sam3) on HuggingFace. A copy is already available on the shared cluster filesystem — ask a team member for the path.
+Download `sam3.pt` (~3.3 GB) from the shared team cloud storage and place it at:
+
+```
+~/checkpoints/sam3/sam3.pt
+```
+
+That is, create the directory `checkpoints/sam3/` inside your own home folder and put the file there. The script finds it automatically — no extra flags needed.
+
+```bash
+mkdir -p ~/checkpoints/sam3
+# then copy/download sam3.pt into that folder
+```
 
 ### Run
 
@@ -95,7 +106,7 @@ The `sam3.pt` checkpoint (~3.3 GB) is from [facebook/sam3](https://huggingface.c
 python scripts/run_sam3_inference.py --sequences 00 01 02
 ```
 
-All paths (dataset root, checkpoint, output directory) default to the project's cluster paths. Override only when needed:
+All paths (dataset root, model weights, output directory) have sensible defaults. Override only when needed:
 
 ```bash
 python scripts/run_sam3_inference.py --sequences 00 --output_dir /tmp/test

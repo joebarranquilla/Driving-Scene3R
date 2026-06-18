@@ -168,6 +168,66 @@ class GaussianModel(nn.Module):
         )
 
     # ------------------------------------------------------------------
+    def append_gaussians(
+        self,
+        means:     torch.Tensor | np.ndarray,    # (M, 3)
+        colors:    torch.Tensor | np.ndarray,    # (M, 3) in [0, 1]
+        scales:    torch.Tensor | np.ndarray,    # (M, 3) positive, metres
+        opacities: torch.Tensor | np.ndarray,    # (M,)   in (0, 1)
+        quats:     torch.Tensor | np.ndarray | None = None,  # (M, 4) wxyz
+    ) -> "GaussianModel":
+        """Concatenate extra Gaussians (e.g. a sky dome) onto this model.
+
+        New Gaussians are appended as fresh :class:`nn.Parameter` tensors on
+        the current device/dtype. Inputs are given in **activated** space
+        (scales/opacities as positive/probability values); they are converted
+        to the model's unconstrained parameterisation here.
+
+        Must be called **before** the optimizer is constructed so the new
+        parameter tensors are picked up by :meth:`param_groups`.
+        """
+        device, dtype = self.means.device, self.means.dtype
+
+        def _as(x) -> torch.Tensor:
+            return torch.as_tensor(x, dtype=dtype, device=device)
+
+        means_t  = _as(means)
+        colors_t = _as(colors).clamp(0.0, 1.0)
+        scales_t = _as(scales)
+        opac_t   = _as(opacities)
+        m = int(means_t.shape[0])
+
+        if means_t.shape != (m, 3):
+            raise ValueError(f"append_gaussians: means must be (M, 3), got {tuple(means_t.shape)}")
+        if colors_t.shape != (m, 3):
+            raise ValueError(f"append_gaussians: colors must be (M, 3), got {tuple(colors_t.shape)}")
+        if scales_t.shape != (m, 3):
+            raise ValueError(f"append_gaussians: scales must be (M, 3), got {tuple(scales_t.shape)}")
+        if opac_t.shape != (m,):
+            raise ValueError(f"append_gaussians: opacities must be (M,), got {tuple(opac_t.shape)}")
+
+        if quats is None:
+            quats_t = torch.zeros(m, 4, dtype=dtype, device=device)
+            quats_t[:, 0] = 1.0
+        else:
+            quats_t = _as(quats)
+            if quats_t.shape != (m, 4):
+                raise ValueError(f"append_gaussians: quats must be (M, 4), got {tuple(quats_t.shape)}")
+
+        log_scales_t = torch.log(scales_t.clamp(min=1e-6))
+        opacity_logit_t = torch.logit(opac_t.clamp(1e-6, 1.0 - 1e-6))
+
+        def _cat(param: nn.Parameter, extra: torch.Tensor) -> nn.Parameter:
+            return nn.Parameter(torch.cat([param.detach(), extra], dim=0))
+
+        self.means          = _cat(self.means,          means_t)
+        self.colors         = _cat(self.colors,         colors_t)
+        self.log_scales     = _cat(self.log_scales,     log_scales_t)
+        self.opacity_logits = _cat(self.opacity_logits, opacity_logit_t)
+        self.quats_raw      = _cat(self.quats_raw,      quats_t)
+        return self
+
+    # ------------------------------------------------------------------
     @property
     def num_gaussians(self) -> int:
         return int(self.means.shape[0])

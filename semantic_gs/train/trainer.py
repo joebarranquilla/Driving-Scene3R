@@ -51,9 +51,9 @@ from semantic_gs.train.render import render_frame
 class TrainConfig:
     """All Phase-3 hyper-parameters. ``train_gs.py`` exposes these as flags."""
 
-    max_iters:    int   = 1500
-    eval_every:   int   = 500
-    ckpt_every:   int   = 1500
+    max_iters:    int   = 10_000
+    eval_every:   int   = 1_000
+    ckpt_every:   int   = 2_500
     eval_stride:  int   = 10      # every Nth frame held out for eval
     lambda_ssim:  float = 0.2
     near_plane:   float = 0.1
@@ -61,6 +61,14 @@ class TrainConfig:
     log_every:    int   = 50
     seed:         int   = 0
     save_renders: bool  = True
+    # Render background colour (RGB in [0, 1]) for pixels no Gaussian covers.
+    # A sky-blue value complements the sky dome by filling inter-splat cracks.
+    bg_color:     tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # ---- synthetic sky dome (free-view backdrop) --------------------------
+    sky_dome:               bool  = False
+    sky_dome_points:        int   = 40_000
+    sky_dome_ground:        bool  = False
+    sky_dome_radius_scale:  float = 3.0
     # Per-tensor learning rates (Inria 3DGS defaults).
     lr_means:    float = 1.6e-4
     lr_colors:   float = 2.5e-3
@@ -159,6 +167,7 @@ def evaluate(
         out     = render_frame(
             model, frame,
             near_plane=cfg.near_plane, far_plane=cfg.far_plane,
+            bg_color=cfg.bg_color,
         )
         pred = out["rgb"].clamp(0.0, 1.0)
         p = psnr(pred, gt_rgb)
@@ -236,6 +245,38 @@ def train(
     print(f"[train] initialised model with {model.num_gaussians:,} Gaussians")
     print(f"[train] device = {device}  ({torch.cuda.get_device_name(0)})")
 
+    # ---- optional synthetic sky dome (free-view backdrop) -----------
+    # Appended BEFORE the optimizer so its parameters join the param groups.
+    # Sky pixels are masked out of the photometric loss, so dome Gaussians
+    # receive ~no gradient and stay put as a clean, parallax-free backdrop.
+    if cfg.sky_dome:
+        from semantic_gs.model.sky_dome import (
+            SkyDomeConfig,
+            make_sky_dome_gaussians,
+            scene_center_radius,
+        )
+        mn, mx = init_pc.bbox
+        center, scene_radius = scene_center_radius(mn, mx)
+        dome_cfg = SkyDomeConfig(
+            enabled        = True,
+            n_points       = cfg.sky_dome_points,
+            radius_scale   = cfg.sky_dome_radius_scale,
+            include_ground = cfg.sky_dome_ground,
+        )
+        dome = make_sky_dome_gaussians(
+            center, scene_radius, dome_cfg, far_plane=cfg.far_plane,
+        )
+        model.append_gaussians(
+            means=dome["means"], colors=dome["colors"],
+            scales=dome["scales"], opacities=dome["opacities"],
+        )
+        print(
+            f"[train] added sky dome: +{dome['means'].shape[0]:,} Gaussians "
+            f"(radius {float(dome['radius'][0]):.1f} m, "
+            f"ground={'on' if cfg.sky_dome_ground else 'off'}) -> "
+            f"{model.num_gaussians:,} total"
+        )
+
     lrs = {
         "means":   cfg.lr_means,   "colors":  cfg.lr_colors,
         "opacity": cfg.lr_opacity, "quats":   cfg.lr_quats,
@@ -283,6 +324,7 @@ def train(
         out      = render_frame(
             model, frame,
             near_plane=cfg.near_plane, far_plane=cfg.far_plane,
+            bg_color=cfg.bg_color,
         )
         pred_rgb = out["rgb"]            # NOTE: do not clamp before loss
         loss, comp = photometric_loss(

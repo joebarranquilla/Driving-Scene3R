@@ -208,10 +208,11 @@ SKIP_TRAIN=0
 FORCE_VENV=0    # if 1, ignore conda even when present
 
 # Phase 3 (gsplat training) hyper-params -------------------------------------
-TRAIN_MAX_ITERS=1500
-TRAIN_EVAL_EVERY=500
+TRAIN_MAX_ITERS=10000
+TRAIN_EVAL_EVERY=1000
 TRAIN_EVAL_STRIDE=10
 TRAIN_MAX_FRAMES=0    # 0 = use all loader frames
+TRAIN_SKY_DOME=1     # 1 = add synthetic sky dome + ground shell to the export
 
 usage() {
   cat <<EOF
@@ -243,6 +244,7 @@ Options:
       --eval-every N      Phase-3 eval/render interval (default: $TRAIN_EVAL_EVERY)
       --eval-stride N     Every Nth loader frame held out for eval (default: $TRAIN_EVAL_STRIDE)
       --max-train-frames N  Cap loader to N frames for faster POC (0 = all)
+      --no-sky-dome       Do NOT add the synthetic sky dome to the export
   -h, --help              Show this help
 
 Re-runs are safe: each stage skips work already done.
@@ -273,6 +275,7 @@ while [[ $# -gt 0 ]]; do
     --eval-every)         TRAIN_EVAL_EVERY="$2"; shift 2 ;;
     --eval-stride)        TRAIN_EVAL_STRIDE="$2"; shift 2 ;;
     --max-train-frames)   TRAIN_MAX_FRAMES="$2"; shift 2 ;;
+    --no-sky-dome)        TRAIN_SKY_DOME=0; shift ;;
     -h|--help)            usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -733,6 +736,9 @@ else
   EXTRA_ARGS=()
   if (( TRAIN_MAX_FRAMES > 0 )); then
     EXTRA_ARGS+=( --max-frames "$TRAIN_MAX_FRAMES" )
+  fi
+  if (( TRAIN_SKY_DOME == 1 )); then
+    EXTRA_ARGS+=( --sky-dome --sky-dome-ground )
   fi
   python -m semantic_gs.scripts.train_gs \
     --kitti-odom-seq "$DATA_ROOT/$SEQUENCE" \

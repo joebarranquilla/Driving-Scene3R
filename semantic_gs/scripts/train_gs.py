@@ -10,7 +10,7 @@ Examples
         --pose-path      /storage/.../sequences/04/poses.txt \\
         --init-pc        /storage/user/<u>/semantic_clouds/seq04_static.npz \\
         --out            /storage/user/<u>/semantic_gs_runs/seq04 \\
-        --max-iters      1500
+        --max-iters      10000
 
     # GPU smoke test (no KITTI, no teammate output — needs CUDA for gsplat):
     python -m semantic_gs.scripts.train_gs --dummy --max-iters 200 \\
@@ -76,9 +76,9 @@ def _parse_args() -> argparse.Namespace:
 
     # Training hyper-params ---------------------------------------------
     p.add_argument("--out",          type=Path, default=Path("runs/poc"))
-    p.add_argument("--max-iters",    type=int,  default=1500)
-    p.add_argument("--eval-every",   type=int,  default=500)
-    p.add_argument("--ckpt-every",   type=int,  default=1500)
+    p.add_argument("--max-iters",    type=int,  default=10_000)
+    p.add_argument("--eval-every",   type=int,  default=1_000)
+    p.add_argument("--ckpt-every",   type=int,  default=2_500)
     p.add_argument("--eval-stride",  type=int,  default=10,
                    help="Every Nth loader frame is held out for eval.")
     p.add_argument("--lambda-ssim",  type=float, default=0.2)
@@ -89,6 +89,24 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed",         type=int,  default=0)
     p.add_argument("--no-renders",   action="store_true",
                    help="Skip writing per-eval-iter render PNGs (still saves PLY + JSON).")
+
+    # ---- sky dome / background (free-view backdrop) -------------------
+    p.add_argument("--sky-dome",     action="store_true",
+                   help="Add a synthetic parallax-free sky dome baked into the "
+                        "exported PLY (recommended for free-view orbits).")
+    p.add_argument("--sky-dome-points", type=int, default=40_000,
+                   help="Full-sphere sample count for the dome (~half kept for "
+                        "a sky-only dome).")
+    p.add_argument("--sky-dome-ground", action="store_true",
+                   help="Also add a neutral lower-hemisphere ground shell so "
+                        "orbiting below the horizon shows ground, not blue void.")
+    p.add_argument("--sky-dome-radius-scale", type=float, default=3.0,
+                   help="Dome radius = this * scene half-diagonal (clamped to "
+                        "< far_plane).")
+    p.add_argument("--bg-color", type=float, nargs=3, metavar=("R", "G", "B"),
+                   default=None,
+                   help="Render background RGB in [0,1] for empty pixels. "
+                        "Defaults to sky-blue when --sky-dome is set, else black.")
     return p.parse_args()
 
 
@@ -197,6 +215,12 @@ def main() -> int:
         far_plane    = args.far_plane,
         seed         = args.seed,
         save_renders = (not args.no_renders),
+        bg_color     = tuple(args.bg_color) if args.bg_color is not None
+                       else ((0.70, 0.82, 0.92) if args.sky_dome else (0.0, 0.0, 0.0)),
+        sky_dome              = args.sky_dome,
+        sky_dome_points       = args.sky_dome_points,
+        sky_dome_ground       = args.sky_dome_ground,
+        sky_dome_radius_scale = args.sky_dome_radius_scale,
     )
 
     try:

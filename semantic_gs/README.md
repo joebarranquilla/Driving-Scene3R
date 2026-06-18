@@ -162,7 +162,7 @@ python -m semantic_gs.scripts.train_gs \
     --pose-path      /storage/.../sequences/04/poses.txt \
     --init-pc        /storage/user/<user>/semantic_clouds/seq04_static.npz \
     --out            /storage/user/<user>/semantic_gs_runs/seq04 \
-    --max-iters      1500
+    --max-iters      10000 --sky-dome --sky-dome-ground
 
 # CUDA smoke test (no KITTI / no teammate output needed, runs in ~30 s):
 python -m semantic_gs.scripts.train_gs --dummy --max-iters 200 \

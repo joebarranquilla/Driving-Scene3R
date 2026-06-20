@@ -267,6 +267,51 @@ def find_nearest_node(arc_lengths: np.ndarray, target_arc: float) -> int:
     return int(np.argmin(np.abs(arc_lengths - target_arc)))
 
 
+def resample_centerline_init(
+    nodes: np.ndarray,
+    arc_lengths: np.ndarray,
+    start_node: int,
+    goal_node: int,
+    n_steps: int,
+) -> np.ndarray:
+    """
+    Resample the centerline segment from ``start_node`` to ``goal_node``
+    into exactly ``n_steps + 1`` evenly-spaced waypoints (by arc-length).
+
+    Parameters
+    ----------
+    nodes        : (N_nodes, 3) centerline node world XYZ positions.
+    arc_lengths  : (N_nodes,)  cumulative arc-length at each node.
+    start_node   : index of the start node.
+    goal_node    : index of the goal node.
+    n_steps      : number of OCP intervals (returns n_steps + 1 points).
+
+    Returns
+    -------
+    waypoints : (n_steps + 1, 2) array of (x, z) positions along the
+                centerline, uniformly spaced in arc-length.
+    """
+    # Slice the centerline segment (support forward or backward indexing)
+    if start_node <= goal_node:
+        seg_nodes = nodes[start_node : goal_node + 1]          # (M, 3)
+        seg_arc   = arc_lengths[start_node : goal_node + 1]    # (M,)
+    else:
+        seg_nodes = nodes[goal_node : start_node + 1][::-1]    # reversed
+        seg_arc   = arc_lengths[goal_node : start_node + 1]    # (M,)
+        seg_arc   = seg_arc[-1] - seg_arc[::-1]                # monotone ↑
+
+    # Normalise arc-length to [0, 1]
+    arc_norm = (seg_arc - seg_arc[0]) / max(seg_arc[-1] - seg_arc[0], 1e-9)
+
+    # Uniformly sampled parameter values
+    t = np.linspace(0.0, 1.0, n_steps + 1)
+
+    x_init = np.interp(t, arc_norm, seg_nodes[:, 0])
+    z_init = np.interp(t, arc_norm, seg_nodes[:, 2])
+
+    return np.stack([x_init, z_init], axis=1)   # (n_steps + 1, 2)
+
+
 # ---------------------------------------------------------------------------
 # NLP setup and solve
 # ---------------------------------------------------------------------------
@@ -296,6 +341,8 @@ def solve_trajectory(
     # solver options
     ipopt_max_iter: int,
     ipopt_print_level: int,
+    # warm-start
+    init_waypoints: np.ndarray | None = None,  # (n_steps+1, 2) (x, z) or None
 ) -> dict:
     """
     Build and solve the multiple-shooting NLP with CasADi's Opti interface.
@@ -361,18 +408,35 @@ def solve_trajectory(
     opti.subject_to(z[n_steps] == z_goal)
 
     # ---- Warm-start initialisation ----------------------------------------
-    # Linearly interpolate position from start to goal; constant heading;
-    # constant speed = straight-line distance / total time.
-    dist_straight = float(np.hypot(x_goal - s_start[0], z_goal - s_start[1]))
-    v_guess       = dist_straight / (n_steps * dt)
-    v_guess       = float(np.clip(v_guess, v_min + 1e-3, v_max))
-    theta_guess   = float(np.arctan2(x_goal - s_start[0], z_goal - s_start[1]))
+    # Prefer a centerline-following path (init_waypoints) when supplied;
+    # fall back to a straight line from A to B otherwise.  Both use a
+    # constant forward speed = path length / total time.
+    if init_waypoints is not None and len(init_waypoints) == n_steps + 1:
+        x_init = init_waypoints[:, 0].astype(float)
+        z_init = init_waypoints[:, 1].astype(float)
+    else:
+        # Straight-line fallback
+        alphas = np.linspace(0.0, 1.0, n_steps + 1)
+        x_init = float(s_start[0]) + alphas * (x_goal - s_start[0])
+        z_init = float(s_start[1]) + alphas * (z_goal - s_start[1])
+
+    # Per-segment arc-length and constant speed along the initial path
+    seg_lengths = np.hypot(np.diff(x_init), np.diff(z_init))   # (n_steps,)
+    path_length = float(seg_lengths.sum()) if len(seg_lengths) else 1.0
+    v_guess     = path_length / (n_steps * dt)
+    v_guess     = float(np.clip(v_guess, v_min + 1e-3, v_max))
+
+    # Per-node heading derived from the initial path geometry
+    dx_seg = np.diff(x_init)   # (n_steps,)
+    dz_seg = np.diff(z_init)   # (n_steps,)
+    theta_seg = np.arctan2(dx_seg, dz_seg)               # (n_steps,)
+    # Extend to n_steps+1: duplicate last heading for the terminal node
+    theta_init = np.append(theta_seg, theta_seg[-1])
 
     for k in range(n_steps + 1):
-        alpha = k / n_steps
-        opti.set_initial(S[0, k], float(s_start[0]) + alpha * (x_goal - s_start[0]))
-        opti.set_initial(S[1, k], float(s_start[1]) + alpha * (z_goal - s_start[1]))
-        opti.set_initial(S[2, k], theta_guess)
+        opti.set_initial(S[0, k], x_init[k])
+        opti.set_initial(S[1, k], z_init[k])
+        opti.set_initial(S[2, k], theta_init[k])
         opti.set_initial(S[3, k], v_guess)
     opti.set_initial(delta, 0.0)
     opti.set_initial(a,     0.0)
@@ -838,6 +902,16 @@ def main() -> None:
     rhs_fn   = make_ackermann_rhs(args.wheelbase)
     rk4_step = make_rk4_step(rhs_fn, args.dt)
 
+    # ---- Resample centerline as warm-start waypoints ---------------------
+    print("[i] Building centerline warm-start …")
+    init_waypoints = resample_centerline_init(
+        nodes, arc_lengths, start_node, goal_node, args.n_steps
+    )
+    cl_arc = float(np.sum(np.hypot(np.diff(init_waypoints[:, 0]),
+                                    np.diff(init_waypoints[:, 1]))))
+    print(f"[i] Warm-start path arc-length = {cl_arc:.1f} m  "
+          f"({args.n_steps + 1} waypoints along centerline)")
+
     # ---- Solve the OCP ---------------------------------------------------
     print(f"[i] Solving OCP (N = {args.n_steps} steps, dt = {args.dt} s, "
           f"total horizon = {args.n_steps * args.dt:.1f} s) …")
@@ -859,6 +933,7 @@ def main() -> None:
         reg_u         = args.reg_u,
         ipopt_max_iter  = args.max_iter,
         ipopt_print_level = 5 if args.verbose else 0,
+        init_waypoints = init_waypoints,
     )
 
     print(f"\n[i] Solver status  : {result['status']}")

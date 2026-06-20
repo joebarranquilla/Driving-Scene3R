@@ -336,11 +336,14 @@ def solve_trajectory(
     a_max: float,
     # constraint
     road_threshold: float,
+    # vehicle footprint
+    half_width: float = 0.0,   # metres; 0 = centre-only (legacy)
+    half_length: float = 0.0,  # metres; 0 = centre-only (legacy)
     # objective
-    reg_u: float,
+    reg_u: float = 1e-4,
     # solver options
-    ipopt_max_iter: int,
-    ipopt_print_level: int,
+    ipopt_max_iter: int = 2000,
+    ipopt_print_level: int = 0,
     # warm-start
     init_waypoints: np.ndarray | None = None,  # (n_steps+1, 2) (x, z) or None
 ) -> dict:
@@ -390,9 +393,34 @@ def solve_trajectory(
         s_k_next = rk4_step(s_k, u_k)
         opti.subject_to(S[:, k + 1] == s_k_next)
 
-    # ---- Road constraints -------------------------------------------------
+    # ---- Road constraints (vehicle footprint) ---------------------------
+    # Four corners of the vehicle rectangle in the KITTI XZ plane.
+    # Coordinate frame: +X right, +Z forward; heading θ from +Z toward +X.
+    #   forward unit  = (sin θ,  cos θ)  in (X, Z)
+    #   right   unit  = (cos θ, -sin θ)  in (X, Z)
+    # Corner offsets (body frame → world frame):
+    #   corner = centre ± half_length·fwd ± half_width·right
+    _hw = half_width
+    _hl = half_length
+    _footprint_offsets = [
+        ( _hl,  _hw),   # front-right
+        ( _hl, -_hw),   # front-left
+        (-_hl,  _hw),   # rear-right
+        (-_hl, -_hw),   # rear-left
+    ] if (_hw > 0 or _hl > 0) else [(0.0, 0.0)]
+
     for k in range(n_steps + 1):
-        opti.subject_to(road_fn(ca.vertcat(x[k], z[k])) >= road_threshold)
+        th = theta[k]
+        sin_th = ca.sin(th)
+        cos_th = ca.cos(th)
+        for (dl, dw) in _footprint_offsets:
+            # world displacement of this corner relative to centre
+            dx_corner = dl * sin_th + dw * cos_th   # X component
+            dz_corner = dl * cos_th - dw * sin_th   # Z component
+            opti.subject_to(
+                road_fn(ca.vertcat(x[k] + dx_corner, z[k] + dz_corner))
+                >= road_threshold
+            )
 
     # ---- State / control bounds -------------------------------------------
     opti.subject_to(opti.bounded(v_min,    v,      v_max))
@@ -751,6 +779,19 @@ def parse_args() -> argparse.Namespace:
         help="Maximum deceleration (m/s², should be negative).",
     )
 
+    # --- Vehicle footprint ---
+    p.add_argument(
+        "--half_width", type=float, default=1.0,
+        help="Vehicle half-width (metres).  Road constraints are checked at all "
+             "four corners of the vehicle rectangle.  Set to 0 to revert to "
+             "centre-only behaviour.",
+    )
+    p.add_argument(
+        "--half_length", type=float, default=2.5,
+        help="Vehicle half-length (metres, front/rear from centre).  "
+             "Combined with --half_width to define the four footprint corners.",
+    )
+
     # --- Road constraint ---
     p.add_argument(
         "--road_threshold", type=float, default=0.5,
@@ -916,24 +957,30 @@ def main() -> None:
     print(f"[i] Solving OCP (N = {args.n_steps} steps, dt = {args.dt} s, "
           f"total horizon = {args.n_steps * args.dt:.1f} s) …")
 
+    print(f"[i] Vehicle footprint: half_width = {args.half_width} m, "
+          f"half_length = {args.half_length} m  "
+          f"({'4-corner check' if args.half_width > 0 or args.half_length > 0 else 'centre-only'})")
+
     result = solve_trajectory(
-        road_fn       = road_fn,
-        s_start       = s_start,
-        x_goal        = x_goal,
-        z_goal        = z_goal,
-        rk4_step      = rk4_step,
-        n_steps       = args.n_steps,
-        dt            = args.dt,
-        v_min         = args.v_min,
-        v_max         = args.v_max,
-        delta_max     = args.delta_max,
-        a_min         = args.a_min,
-        a_max         = args.a_max,
+        road_fn        = road_fn,
+        s_start        = s_start,
+        x_goal         = x_goal,
+        z_goal         = z_goal,
+        rk4_step       = rk4_step,
+        n_steps        = args.n_steps,
+        dt             = args.dt,
+        v_min          = args.v_min,
+        v_max          = args.v_max,
+        delta_max      = args.delta_max,
+        a_min          = args.a_min,
+        a_max          = args.a_max,
         road_threshold = args.road_threshold,
-        reg_u         = args.reg_u,
-        ipopt_max_iter  = args.max_iter,
+        half_width     = args.half_width,
+        half_length    = args.half_length,
+        reg_u          = args.reg_u,
+        ipopt_max_iter    = args.max_iter,
         ipopt_print_level = 5 if args.verbose else 0,
-        init_waypoints = init_waypoints,
+        init_waypoints    = init_waypoints,
     )
 
     print(f"\n[i] Solver status  : {result['status']}")

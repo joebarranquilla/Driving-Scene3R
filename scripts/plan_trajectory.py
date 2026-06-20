@@ -673,7 +673,7 @@ def visualize(
 
     # Optimal trajectory
     ax.plot(result["x_traj"], result["z_traj"],
-            "r-", linewidth=2.5, label="Optimal trajectory", zorder=4)
+            "r-", linewidth=1.5, label="Optimal trajectory", zorder=4)
 
     # Vehicle footprint rectangles every n_steps // 10 steps
     n_steps = result["n_steps"]

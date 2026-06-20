@@ -624,6 +624,8 @@ def visualize(
     result: dict,
     start_node: int,
     goal_node: int,
+    half_width: float = 0.0,
+    half_length: float = 0.0,
 ) -> None:
     """Save a top-down PNG showing the occupancy grid, centerline, and optimal trajectory."""
     try:
@@ -631,6 +633,8 @@ def visualize(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import matplotlib.patches as mpatches
+        from matplotlib.patches import Polygon
+        from matplotlib.collections import PatchCollection
     except ImportError:
         print("[warn] matplotlib not available – skipping visualisation.")
         return
@@ -670,16 +674,56 @@ def visualize(
     # Optimal trajectory
     ax.plot(result["x_traj"], result["z_traj"],
             "r-", linewidth=2.5, label="Optimal trajectory", zorder=4)
-    ax.quiver(
-        result["x_traj"][::5],
-        result["z_traj"][::5],
-        np.sin(result["theta_traj"][::5]),
-        np.cos(result["theta_traj"][::5]),
-        color="red",
-        scale=15,
-        width=0.003,
-        alpha=0.8,
-    )
+
+    # Vehicle footprint rectangles every n_steps // 10 steps
+    n_steps = result["n_steps"]
+    footprint_stride = max(1, n_steps // 10)
+    _hw = half_width
+    _hl = half_length
+    footprint_indices = list(range(0, n_steps + 1, footprint_stride))
+    if footprint_indices[-1] != n_steps:
+        footprint_indices.append(n_steps)
+
+    if _hw > 0 or _hl > 0:
+        cmap_fp = plt.cm.plasma
+        n_fp = len(footprint_indices)
+        for i, k in enumerate(footprint_indices):
+            xc  = result["x_traj"][k]
+            zc  = result["z_traj"][k]
+            th  = result["theta_traj"][k]
+            sin_th = np.sin(th)
+            cos_th = np.cos(th)
+            # Four corners: (dl, dw) combinations where dl = ±hl, dw = ±hw
+            # world displacement: X = dl*sin + dw*cos, Z = dl*cos - dw*sin
+            corners = np.array([
+                [xc + _hl*sin_th + _hw*cos_th, zc + _hl*cos_th - _hw*sin_th],  # front-right
+                [xc + _hl*sin_th - _hw*cos_th, zc + _hl*cos_th + _hw*sin_th],  # front-left
+                [xc - _hl*sin_th - _hw*cos_th, zc - _hl*cos_th + _hw*sin_th],  # rear-left
+                [xc - _hl*sin_th + _hw*cos_th, zc - _hl*cos_th - _hw*sin_th],  # rear-right
+            ])
+            color = cmap_fp(i / max(n_fp - 1, 1))
+            poly = Polygon(corners, closed=True,
+                           facecolor=color, edgecolor="black",
+                           alpha=0.45, linewidth=0.8, zorder=3)
+            ax.add_patch(poly)
+        # Add a dummy patch for the legend
+        legend_fp = mpatches.Patch(facecolor="mediumpurple", edgecolor="black",
+                                   alpha=0.6, label="Vehicle footprint")
+        handles, labels = ax.get_legend_handles_labels()
+        handles.append(legend_fp)
+    else:
+        # No footprint: fall back to heading arrows
+        ax.quiver(
+            result["x_traj"][::5],
+            result["z_traj"][::5],
+            np.sin(result["theta_traj"][::5]),
+            np.cos(result["theta_traj"][::5]),
+            color="red",
+            scale=15,
+            width=0.003,
+            alpha=0.8,
+        )
+        handles, labels = ax.get_legend_handles_labels()
 
     ax.set_xlabel("X – world (m, right)")
     ax.set_ylabel("Z – world (m, forward)")
@@ -687,11 +731,67 @@ def visualize(
         f"Optimal trajectory  |  arc-length = {result['arc_length']:.1f} m  "
         f"|  status = {result['status']}"
     )
-    ax.legend(loc="upper left")
+    ax.legend(handles=handles, loc="upper left")
     ax.grid(True, alpha=0.3)
     ax.set_aspect("equal")
 
     png_path = out_dir / "optimal_trajectory.png"
+    fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"    [✓] {png_path}")
+
+
+def plot_control_profiles(out_dir: Path, result: dict) -> None:
+    """Save a figure with three sub-plots: velocity, acceleration, steering angle."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[warn] matplotlib not available – skipping control profile plots.")
+        return
+
+    n_steps = result["n_steps"]
+    dt      = result["dt"]
+
+    # Time axes: states are at nodes 0..N, controls at intervals 0..N-1
+    t_state   = np.arange(n_steps + 1) * dt          # (N+1,)
+    t_control = (np.arange(n_steps) + 0.5) * dt      # (N,)  interval midpoints
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
+    fig.suptitle(
+        f"Control profiles  |  arc-length = {result['arc_length']:.1f} m  "
+        f"|  status = {result['status']}",
+        fontsize=11,
+    )
+
+    # -- Velocity -----------------------------------------------------------
+    ax = axes[0]
+    ax.plot(t_state, result["v_traj"], color="steelblue", linewidth=1.8)
+    ax.set_ylabel("Speed (m/s)")
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Velocity")
+
+    # -- Acceleration -------------------------------------------------------
+    ax = axes[1]
+    ax.plot(t_control, result["a_traj"], color="darkorange", linewidth=1.8)
+    ax.axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
+    ax.set_ylabel("Acceleration (m/s²)")
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Longitudinal Acceleration")
+
+    # -- Steering angle -----------------------------------------------------
+    ax = axes[2]
+    ax.plot(t_control, np.degrees(result["delta_traj"]),
+            color="forestgreen", linewidth=1.8)
+    ax.axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
+    ax.set_ylabel("Steering angle (deg)")
+    ax.set_xlabel("Time (s)")
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Front-Wheel Steering Angle")
+
+    fig.tight_layout()
+    png_path = out_dir / "control_profiles.png"
     fig.savefig(str(png_path), dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"    [✓] {png_path}")
@@ -1008,7 +1108,11 @@ def main() -> None:
         visualize(
             out_dir, grid, origin_x, origin_z, resolution,
             nodes, result, start_node, goal_node,
+            half_width=args.half_width,
+            half_length=args.half_length,
         )
+        print("[i] Rendering control profiles …")
+        plot_control_profiles(out_dir, result)
 
     print(f"\n[✓] Done.  Outputs in: {out_dir}")
 

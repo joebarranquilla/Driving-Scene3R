@@ -425,6 +425,52 @@ def solve_trajectory(
 
 
 # ---------------------------------------------------------------------------
+# Height snapping
+# ---------------------------------------------------------------------------
+
+def snap_y_to_road(
+    x_traj: np.ndarray,
+    z_traj: np.ndarray,
+    nodes: np.ndarray,
+    k: int = 8,
+) -> np.ndarray:
+    """
+    For each planned (x, z) waypoint find the k nearest centerline nodes
+    (queried in the XZ plane only) and return the mean of their road-surface
+    Y values as the ground-level Y coordinate.
+
+    Parameters
+    ----------
+    x_traj, z_traj : (M,) planned trajectory coordinates.
+    nodes          : (N, 3) centerline node positions (world XYZ) whose Y
+                     has already been snapped to the road surface by
+                     ``build_centerline_graph``.
+    k              : number of neighbours to average (clamped to len(nodes)).
+
+    Returns
+    -------
+    y_traj : (M,) road-surface Y coordinate per waypoint (KITTI +Y = down).
+    """
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:
+        print("[warn] scipy not available – Y will be linearly interpolated "
+              "between start and goal node heights.")
+        y_start = nodes[0, 1]
+        y_end   = nodes[-1, 1]
+        return np.linspace(y_start, y_end, len(x_traj))
+
+    xz_query = np.stack([x_traj, z_traj], axis=1)          # (M, 2)
+    k_eff    = min(k, len(nodes))
+    tree     = cKDTree(nodes[:, [0, 2]])                    # build on XZ only
+    _, idx   = tree.query(xz_query, k=k_eff, workers=-1)
+    if k_eff == 1:
+        idx = idx[:, np.newaxis]
+    y_traj = nodes[idx, 1].mean(axis=1)                     # (M,)
+    return y_traj.astype(np.float64)
+
+
+# ---------------------------------------------------------------------------
 # I/O helpers
 # ---------------------------------------------------------------------------
 
@@ -436,6 +482,7 @@ def save_results(out_dir: Path, result: dict, start_node: int, goal_node: int) -
     np.savez_compressed(
         str(npz_path),
         x=result["x_traj"],
+        y=result["y_traj"],
         z=result["z_traj"],
         theta=result["theta_traj"],
         v=result["v_traj"],
@@ -461,6 +508,7 @@ def save_results(out_dir: Path, result: dict, start_node: int, goal_node: int) -
                 "goal_node":     goal_node,
                 "trajectory": {
                     "x":     result["x_traj"].tolist(),
+                    "y":     result["y_traj"].tolist(),
                     "z":     result["z_traj"].tolist(),
                     "theta": result["theta_traj"].tolist(),
                     "v":     result["v_traj"].tolist(),
@@ -821,6 +869,13 @@ def main() -> None:
           f"{result['v_traj'].max():.2f} m/s")
     print(f"[i] Steering range : {np.degrees(result['delta_traj'].min()):.1f}° – "
           f"{np.degrees(result['delta_traj'].max()):.1f}°")
+
+    # ---- Snap Y to road surface ------------------------------------------
+    print("[i] Snapping trajectory Y to road surface …")
+    y_traj = snap_y_to_road(result["x_traj"], result["z_traj"], nodes)
+    result["y_traj"] = y_traj
+    print(f"[i] Y range        : {y_traj.min():.3f} – {y_traj.max():.3f} m  "
+          f"(KITTI +Y = down)")
 
     # ---- Save results ----------------------------------------------------
     print("\n[i] Saving outputs …")

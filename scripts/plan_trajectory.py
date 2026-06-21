@@ -30,10 +30,18 @@ Road constraint
   drivable area.
 
 Objective
-  Minimise total arc-length (path distance)
-    J = Σ_{k=0}^{N-1}  v_k · dt  +  ε · Σ_k (δ_k² + a_k²)
+  Minimise total arc-length (path distance) + optional centerline-tracking term
+    J = Σ_{k=0}^{N-1}  v_k · dt
+        + ε   · Σ_k (δ_k² + a_k²)
+        + w_cl · Σ_k e_lat,k²
   The first term is arc-length = ∫|v|dt; the second is a tiny control
-  regulariser to keep the problem well-conditioned.
+  regulariser to keep the problem well-conditioned; the third penalises
+  signed lateral deviation from the resampled centerline in the Frenet frame:
+    e_lat,k = cos(ψ_k)·(x_k - x̄_k) − sin(ψ_k)·(z_k − z̄_k)
+  where (x̄_k, z̄_k) and ψ_k are the position and yaw of the k-th
+  resampled centerline node.  This term prevents the optimizer from
+  cutting corners while leaving arc-length minimisation as the primary goal.
+  Set --w_centerline 0 (default) to disable it.
 
 Endpoints  A and B
   A  = centerline node closest in arc-length to frame ``--start_frame``
@@ -341,6 +349,10 @@ def solve_trajectory(
     half_length: float = 0.0,  # metres; 0 = centre-only (legacy)
     # objective
     reg_u: float = 1e-4,
+    # centerline-tracking penalty (Frenet lateral offset)
+    cl_waypoints: np.ndarray | None = None,  # (n_steps+1, 2) resampled centerline (x, z)
+    cl_yaw: np.ndarray | None = None,        # (n_steps+1,)  centerline yaw angles (rad)
+    w_centerline: float = 0.0,
     # solver options
     ipopt_max_iter: int = 2000,
     ipopt_print_level: int = 0,
@@ -380,10 +392,42 @@ def solve_trajectory(
     # ---- Objective --------------------------------------------------------
     #   arc-length = Σ v_k · dt  (forward-only, so v ≥ 0 ⟹ |v| = v)
     #   + small regularisation on controls
+    #   + optional Frenet lateral deviation from centerline
+    #
+    #   Frenet signed lateral offset at node k (right = positive):
+    #     e_lat,k = cos(ψ_k)·(x_k − x̄_k) − sin(ψ_k)·(z_k − z̄_k)
+    #   where ψ_k, x̄_k, z̄_k come from the resampled centerline passed in.
+    #   In the KITTI XZ frame (+X right, +Z forward, yaw from +Z toward +X):
+    #     fwd  = (sin ψ, cos ψ)  in (X, Z)
+    #     right = (cos ψ, −sin ψ) in (X, Z)
+    #   so the lateral component of (x − x̄, z − z̄) is:
+    #     e_lat = cos(ψ)·(x−x̄) − sin(ψ)·(z−z̄)
+    use_cl_penalty = (
+        w_centerline > 0.0
+        and cl_waypoints is not None
+        and cl_yaw is not None
+        and len(cl_waypoints) == n_steps + 1
+        and len(cl_yaw) == n_steps + 1
+    )
     cost = 0
     for k in range(n_steps):
         cost += v[k] * dt
         cost += reg_u * (delta[k]**2 + a[k]**2)
+        if use_cl_penalty:
+            cl_x_k   = float(cl_waypoints[k, 0])
+            cl_z_k   = float(cl_waypoints[k, 1])
+            cl_yaw_k = float(cl_yaw[k])
+            e_lat = (ca.cos(cl_yaw_k) * (x[k] - cl_x_k)
+                     - ca.sin(cl_yaw_k) * (z[k] - cl_z_k))
+            cost += w_centerline * e_lat**2
+    # Lateral penalty at the terminal node too (k = n_steps)
+    if use_cl_penalty:
+        cl_x_k   = float(cl_waypoints[n_steps, 0])
+        cl_z_k   = float(cl_waypoints[n_steps, 1])
+        cl_yaw_k = float(cl_yaw[n_steps])
+        e_lat = (ca.cos(cl_yaw_k) * (x[n_steps] - cl_x_k)
+                 - ca.sin(cl_yaw_k) * (z[n_steps] - cl_z_k))
+        cost += w_centerline * e_lat**2
     opti.minimize(cost)
 
     # ---- Dynamics constraints (defect = 0) --------------------------------
@@ -910,6 +954,13 @@ def parse_args() -> argparse.Namespace:
         "--reg_u", type=float, default=1e-4,
         help="Control regularisation weight (applied to δ² + a² at each step).",
     )
+    p.add_argument(
+        "--w_centerline", type=float, default=0.1,
+        help="Weight for the Frenet-frame lateral offset penalty from the "
+             "centerline (applied to e_lat² at each node).  Set to 0 to disable. "
+             "Typical range: 0.05–1.0.  Higher values enforce tighter lane-keeping "
+             "at the cost of slightly increased arc-length.",
+    )
 
     # --- Solver ---
     p.add_argument(
@@ -1053,6 +1104,14 @@ def main() -> None:
     print(f"[i] Warm-start path arc-length = {cl_arc:.1f} m  "
           f"({args.n_steps + 1} waypoints along centerline)")
 
+    # Derive yaw angles for each resampled centerline node from finite differences.
+    # This gives the heading ψ_k at the k-th node, used for the Frenet lateral
+    # offset penalty: e_lat,k = cos(ψ_k)·(x_k−x̄_k) − sin(ψ_k)·(z_k−z̄_k).
+    dx_cl = np.diff(init_waypoints[:, 0])   # (n_steps,)
+    dz_cl = np.diff(init_waypoints[:, 1])   # (n_steps,)
+    cl_yaw_seg = np.arctan2(dx_cl, dz_cl)                     # (n_steps,)
+    cl_yaw_resampled = np.append(cl_yaw_seg, cl_yaw_seg[-1])  # (n_steps+1,)
+
     # ---- Solve the OCP ---------------------------------------------------
     print(f"[i] Solving OCP (N = {args.n_steps} steps, dt = {args.dt} s, "
           f"total horizon = {args.n_steps * args.dt:.1f} s) …")
@@ -1060,6 +1119,10 @@ def main() -> None:
     print(f"[i] Vehicle footprint: half_width = {args.half_width} m, "
           f"half_length = {args.half_length} m  "
           f"({'4-corner check' if args.half_width > 0 or args.half_length > 0 else 'centre-only'})")
+
+    cl_penalty_str = (f"w_centerline = {args.w_centerline}"
+                      if args.w_centerline > 0 else "disabled")
+    print(f"[i] Centerline lateral penalty: {cl_penalty_str}")
 
     result = solve_trajectory(
         road_fn        = road_fn,
@@ -1078,6 +1141,9 @@ def main() -> None:
         half_width     = args.half_width,
         half_length    = args.half_length,
         reg_u          = args.reg_u,
+        cl_waypoints   = init_waypoints,
+        cl_yaw         = cl_yaw_resampled,
+        w_centerline   = args.w_centerline,
         ipopt_max_iter    = args.max_iter,
         ipopt_print_level = 5 if args.verbose else 0,
         init_waypoints    = init_waypoints,

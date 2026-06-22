@@ -841,6 +841,138 @@ def plot_control_profiles(out_dir: Path, result: dict) -> None:
     print(f"    [✓] {png_path}")
 
 
+def save_trajectory_gif(
+    out_dir: Path,
+    grid: np.ndarray,
+    origin_x: float,
+    origin_z: float,
+    resolution: float,
+    nodes: np.ndarray,
+    result: dict,
+    start_node: int,
+    goal_node: int,
+    half_width: float = 0.0,
+    half_length: float = 0.0,
+    fps: int = 12,
+) -> None:
+    """Save a GIF animation with the ego vehicle moving along the trajectory."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib import animation
+        from matplotlib.patches import Polygon
+    except ImportError:
+        print("[warn] matplotlib animation dependencies not available – skipping GIF export.")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    # Occupancy grid (flip rows so Z increases upward)
+    n_rows, n_cols = grid.shape
+    extent = [
+        origin_x,
+        origin_x + n_cols * resolution,
+        origin_z,
+        origin_z + n_rows * resolution,
+    ]
+    ax.imshow(
+        grid,
+        origin="lower",
+        extent=extent,
+        cmap="Greens",
+        alpha=0.35,
+        vmin=0,
+        vmax=1,
+        aspect="equal",
+    )
+
+    # Centerline and full planned trajectory
+    cx = nodes[:, 0]
+    cz = nodes[:, 2]
+    ax.plot(cx, cz, "b--", linewidth=1.0, alpha=0.5, label="Centerline")
+    ax.plot(result["x_traj"], result["z_traj"],
+            "r-", linewidth=1.3, alpha=0.8, label="Optimal trajectory")
+
+    # Start / goal markers
+    ax.plot(nodes[start_node, 0], nodes[start_node, 2],
+            "go", markersize=10, label=f"Start (node {start_node})", zorder=5)
+    ax.plot(nodes[goal_node, 0], nodes[goal_node, 2],
+            "rs", markersize=10, label=f"Goal (node {goal_node})", zorder=5)
+
+    # Animated artists: travelled path + ego marker/footprint
+    (trail_line,) = ax.plot([], [], color="crimson", linewidth=2.3, zorder=6)
+    (ego_dot,) = ax.plot([], [], "o", color="gold", markeredgecolor="black",
+                         markersize=9, zorder=8)
+
+    ego_poly = None
+    if half_width > 0 or half_length > 0:
+        ego_poly = Polygon(np.zeros((4, 2)), closed=True,
+                           facecolor="gold", edgecolor="black",
+                           alpha=0.65, linewidth=1.0, zorder=7)
+        ax.add_patch(ego_poly)
+
+    ax.set_xlabel("X – world (m, right)")
+    ax.set_ylabel("Z – world (m, forward)")
+    ax.set_title("Trajectory animation")
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect("equal")
+    ax.legend(loc="upper left")
+
+    # Keep fixed limits to avoid camera jitter during animation
+    x_all = np.concatenate([result["x_traj"], cx])
+    z_all = np.concatenate([result["z_traj"], cz])
+    x_pad = max(2.0, 0.03 * (x_all.max() - x_all.min() + 1e-9))
+    z_pad = max(2.0, 0.03 * (z_all.max() - z_all.min() + 1e-9))
+    ax.set_xlim(float(x_all.min() - x_pad), float(x_all.max() + x_pad))
+    ax.set_ylim(float(z_all.min() - z_pad), float(z_all.max() + z_pad))
+
+    x_traj = result["x_traj"]
+    z_traj = result["z_traj"]
+    th_traj = result["theta_traj"]
+    n_frames = len(x_traj)
+
+    def _update(frame_idx: int):
+        trail_line.set_data(x_traj[: frame_idx + 1], z_traj[: frame_idx + 1])
+        xc = float(x_traj[frame_idx])
+        zc = float(z_traj[frame_idx])
+        th = float(th_traj[frame_idx])
+        ego_dot.set_data([xc], [zc])
+
+        if ego_poly is not None:
+            sin_th = np.sin(th)
+            cos_th = np.cos(th)
+            corners = np.array([
+                [xc + half_length * sin_th + half_width * cos_th, zc + half_length * cos_th - half_width * sin_th],
+                [xc + half_length * sin_th - half_width * cos_th, zc + half_length * cos_th + half_width * sin_th],
+                [xc - half_length * sin_th - half_width * cos_th, zc - half_length * cos_th + half_width * sin_th],
+                [xc - half_length * sin_th + half_width * cos_th, zc - half_length * cos_th - half_width * sin_th],
+            ])
+            ego_poly.set_xy(corners)
+            return trail_line, ego_dot, ego_poly
+
+        return trail_line, ego_dot
+
+    anim = animation.FuncAnimation(
+        fig,
+        _update,
+        frames=n_frames,
+        interval=max(1, int(1000 / max(fps, 1))),
+        blit=True,
+        repeat=True,
+    )
+
+    gif_path = out_dir / "optimal_trajectory.gif"
+    try:
+        writer = animation.PillowWriter(fps=max(fps, 1))
+        anim.save(str(gif_path), writer=writer)
+        print(f"    [✓] {gif_path}")
+    except Exception as exc:
+        print(f"[warn] Failed to save GIF animation: {exc}")
+    finally:
+        plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -1172,6 +1304,13 @@ def main() -> None:
     if args.visualize:
         print("[i] Rendering visualisation …")
         visualize(
+            out_dir, grid, origin_x, origin_z, resolution,
+            nodes, result, start_node, goal_node,
+            half_width=args.half_width,
+            half_length=args.half_length,
+        )
+        print("[i] Rendering trajectory GIF …")
+        save_trajectory_gif(
             out_dir, grid, origin_x, origin_z, resolution,
             nodes, result, start_node, goal_node,
             half_width=args.half_width,

@@ -1,10 +1,7 @@
 """Real-data sequence loader for KITTI odometry with **SAM 3** masks.
 
-This is the SAM 3 sibling of :class:`~semantic_gs.data.adapters.kitti_odom.KITTIOdomSequenceLoader`.
-It wires together exactly the same four inputs and produces the same
-:class:`~semantic_gs.data.frame.Frame` contract, with one swap: the
-per-frame segmentation comes from ``scripts/run_sam3_inference.py`` output
-instead of Mask2Former panoptic output.
+SAM 3 is the project's sole segmentation source. This loader wires the four
+inputs into a :class:`~semantic_gs.data.frame.Frame`:
 
 * RGB frames        ``<sequence_dir>/image_2/<stem>.png``
 * Intrinsics        ``<sequence_dir>/calib.txt`` -> ``P2``
@@ -12,16 +9,14 @@ instead of Mask2Former panoptic output.
 * Depth (teammate)  ``<depth_dir>/<stem>.npz``  key ``"depth"``
 * SAM 3 (me)        ``<sam3_dir>/<stem>.npz`` + sibling ``concepts.json``
 
-The two loaders are deliberately kept separate so the Mask2Former path is
-never broken: pick one via the segmentation source you actually have. Unlike
-the Mask2Former loader there is no ``dynamic_classes`` / ``unreliable_depth_classes``
-argument, because SAM 3 only ever segments dynamic agents — every instance is
-dynamic, so the static mask is simply ``instance_seg == 0`` (see
-:meth:`Sam3Prediction.static_mask`). Sky is not labelled by SAM 3; rely on
+The SAM 3 prompts cover both DYNAMIC agents (car/pedestrian/cyclist) and the
+static drivable surface (``road``). The static mask therefore excludes only
+the *dynamic* concepts (configurable via ``dynamic_concepts``) and keeps road +
+unsegmented background — see :meth:`Sam3Prediction.static_mask`, which uses
+``build_static_mask(..., void_is_static=True)``. Sky is not prompted; rely on
 ``far_plane`` / depth truncation downstream to drop it.
 
-Like the Mask2Former loader this is read-only and lazy: only the requested
-frame is fetched into memory.
+Read-only and lazy: only the requested frame is fetched into memory.
 """
 
 from __future__ import annotations
@@ -35,6 +30,7 @@ from PIL import Image
 
 from semantic_gs.data.adapters.depth_npz import load_depth_npz
 from semantic_gs.data.adapters.sam3_npz import (
+    DEFAULT_SAM3_DYNAMIC_CONCEPTS,
     load_concepts_json,
     load_sam3_npz,
 )
@@ -77,6 +73,10 @@ class KITTISam3SequenceLoader(SequenceLoader):
     boundary_margin
         Pixels to erode around every instance boundary before building the
         static mask (stereo depth bleeds across edges). ``0`` disables it.
+    dynamic_concepts
+        Concept names removed from the static mask. Defaults to
+        :data:`~semantic_gs.data.adapters.sam3_npz.DEFAULT_SAM3_DYNAMIC_CONCEPTS`
+        (car/pedestrian/cyclist/...). Static concepts like ``road`` are kept.
     skip_incomplete_frames
         If ``True`` (default), frames missing a depth or SAM 3 NPZ are
         skipped with a warning. If ``False``, the loader raises.
@@ -95,6 +95,7 @@ class KITTISam3SequenceLoader(SequenceLoader):
         *,
         camera_index:           int = 2,
         image_subdir:           str = "image_2",
+        dynamic_concepts:       frozenset[str] | None = None,
         boundary_margin:        int = 0,
         skip_incomplete_frames: bool = True,
         frame_stems:            Iterable[str] | None = None,
@@ -131,6 +132,8 @@ class KITTISam3SequenceLoader(SequenceLoader):
         self._concepts: dict[int, str] = load_concepts_json(self._concepts_path)
 
         # --- config -----------------------------------------------------
+        self._dynamic_concepts = (dynamic_concepts if dynamic_concepts is not None
+                                  else DEFAULT_SAM3_DYNAMIC_CONCEPTS)
         self._boundary_margin = int(boundary_margin)
         self._skip_incomplete = bool(skip_incomplete_frames)
 
@@ -205,7 +208,11 @@ class KITTISam3SequenceLoader(SequenceLoader):
                 f"!= RGB shape ({H}, {W})"
             )
 
-        static_mask = sam3.static_mask(boundary_margin=self._boundary_margin)
+        static_mask = sam3.static_mask(
+            id2label        = self._concepts,
+            dynamic_classes = self._dynamic_concepts,
+            boundary_margin = self._boundary_margin,
+        )
 
         T_cam2_to_world = cam_i_to_world_from_cam0(
             self._T_cam0_to_world[pose_idx], self._P_i

@@ -6,14 +6,12 @@ semantic Gaussian Splatting model.
 
 Coordinate-frame caveat
 -----------------------
-The teammate's lift script uses cam-0 odometry poses directly for cam-2's
-back-projection (the ~6 cm rectified baseline along world-X is not
-applied). This means every point in the returned cloud is shifted by
-~6 cm in world-X relative to a strictly cam-2-anchored frame. The error
-is **systematic** (same direction every frame), so within-sequence
-geometry is internally consistent; only the absolute alignment with
-``Frame.T_cam_to_world`` from :class:`KITTIOdomSequenceLoader` is off by
-that constant. See ``semantic_gs/README.md`` for the open team issue.
+In the SAM 3-only pipeline this cloud is produced by
+``semantic_gs.scripts.init_pc_from_loader``, which back-projects the static
+pixels of :class:`~semantic_gs.data.adapters.kitti_odom_sam3.KITTISam3SequenceLoader`
+frames using the very same ``Frame.T_cam_to_world`` that Phase-3 training uses
+for supervision. Init geometry and training poses therefore share one
+convention — no systematic cam-0/cam-2 baseline offset to correct.
 """
 
 from __future__ import annotations

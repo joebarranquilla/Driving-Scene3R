@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from semantic_gs.data.adapters.dummy import DummySequenceLoader
-from semantic_gs.data.adapters.kitti_odom import KITTIOdomSequenceLoader
+from semantic_gs.data.adapters.kitti_odom_sam3 import KITTISam3SequenceLoader
 from semantic_gs.data.dataset import SequenceLoader
 from semantic_gs.data.frame import Frame
 
@@ -51,13 +51,13 @@ def _parse_args() -> argparse.Namespace:
     # --- KITTI-only flags (validated only if --kitti-odom-seq is used) ---
     p.add_argument("--depth-dir",  metavar="DIR",
                    help="(KITTI) directory with per-frame depth .npz files.")
-    p.add_argument("--pano-dir",   metavar="DIR",
-                   help="(KITTI) directory with per-frame panoptic .npz files.")
+    p.add_argument("--sam3-dir",   metavar="DIR",
+                   help="(KITTI) directory with per-frame SAM 3 .npz files.")
     p.add_argument("--pose-path",  metavar="FILE",
                    help="(KITTI) per-sequence poses .txt file.")
-    p.add_argument("--id2label",   metavar="FILE", default=None,
-                   help="(KITTI) optional override for id2label.json. "
-                        "Defaults to <pano-dir>/../id2label.json.")
+    p.add_argument("--concepts-path", metavar="FILE", default=None,
+                   help="(KITTI) optional override for concepts.json. "
+                        "Defaults to <sam3-dir>/../concepts.json.")
     p.add_argument("--camera-index", type=int, default=2, choices=(2, 3),
                    help="(KITTI) which P_i to use (2 = image_2, 3 = image_3).")
 
@@ -76,7 +76,7 @@ def _parse_args() -> argparse.Namespace:
     if args.kitti_odom_seq:
         missing = [name for name, val in
                    (("--depth-dir", args.depth_dir),
-                    ("--pano-dir",  args.pano_dir),
+                    ("--sam3-dir",  args.sam3_dir),
                     ("--pose-path", args.pose_path))
                    if val is None]
         if missing:
@@ -168,12 +168,12 @@ def _save_viz(loader: SequenceLoader, frame: Frame, out_path: Path) -> None:
 def _build_loader(args: argparse.Namespace) -> SequenceLoader:
     if args.dummy:
         return DummySequenceLoader(num_frames=args.num_frames)
-    return KITTIOdomSequenceLoader(
+    return KITTISam3SequenceLoader(
         sequence_dir   = args.kitti_odom_seq,
         depth_dir      = args.depth_dir,
-        panoptic_dir   = args.pano_dir,
+        sam3_dir       = args.sam3_dir,
         pose_path      = args.pose_path,
-        id2label_path  = args.id2label,
+        concepts_path  = args.concepts_path,
         camera_index   = args.camera_index,
     )
 

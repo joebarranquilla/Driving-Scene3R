@@ -49,32 +49,6 @@ python scripts/run_mobilestereonet_inference.py \
 Output: `{output_dir}/{sequence}/{frame_stem}.npz` with key `"depth"` — float32 (H, W) in metres.  
 Interrupted runs resume automatically (existing frames are skipped).
 
-## Mask2Former panoptic segmentation
-
-See `scripts/run_mask2former_inference.py` for full documentation and all CLI options.
-
-### Run
-
-No manual download needed — weights are fetched from the HuggingFace Hub on first use.
-
-```bash
-python scripts/run_mask2former_inference.py \
-    --dataset_root /storage/.../dataset/sequences \
-    --sequences    00 01 02 \
-    --output_dir   /usr/prakt/<user>/panoptic_predictions \
-    --batch_size   4
-```
-
-The default model is `facebook/mask2former-swin-large-cityscapes-panoptic` (Cityscapes label space: car, pedestrian, road, sky, …). A lighter variant can be selected with `--hf_model facebook/mask2former-swin-base-cityscapes-panoptic`.
-
-Output: `{output_dir}/{sequence}/{frame_stem}.npz` with keys:
-- `"panoptic_seg"` — int32 (H, W), segment ID per pixel (0 = void)
-- `"segment_ids"` / `"label_ids"` / `"scores"` — 1-D arrays, one entry per segment
-
-A `{output_dir}/id2label.json` mapping label IDs to class names is written once.
-
-Interrupted runs resume automatically (existing frames are skipped).
-
 ## SAM 3 instance segmentation
 
 See `scripts/run_sam3_inference.py` for full documentation and all CLI options.
@@ -112,7 +86,7 @@ All paths (dataset root, model weights, output directory) have sensible defaults
 python scripts/run_sam3_inference.py --sequences 00 --output_dir /tmp/test
 ```
 
-Concepts default to those listed in `concepts.txt` in the repo root (`car`, `pedestrian`, `cyclist`). Edit that file to change them, or pass `--concepts car truck pedestrian` to override on the fly.
+Concepts default to those listed in `concepts.txt` in the repo root (`car`, `pedestrian`, `cyclist`, `road`). The dynamic agents are removed from the static scene; `road` (the drivable surface) is kept and labelled for downstream use. Edit that file to change them, or pass `--concepts car pedestrian cyclist road` to override on the fly.
 
 Output: `{output_dir}/{sequence}/{frame_stem}.npz` with keys:
 - `"instance_seg"` — int32 (H, W), `(track_id + 1)` per pixel (0 = background)

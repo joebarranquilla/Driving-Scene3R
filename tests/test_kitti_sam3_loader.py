@@ -23,21 +23,23 @@ from semantic_gs.data.adapters.mock_teammate_outputs import (
 from semantic_gs.data.frame import Frame
 
 
-CONCEPTS = {0: "car", 1: "pedestrian", 2: "cyclist"}
+CONCEPTS = {0: "car", 1: "pedestrian", 2: "cyclist", 3: "road"}
 
 
 def _write_sam3_frame(path: Path, H: int, W: int):
-    """Fabricate a SAM 3 NPZ with two instances: track 0 (car), track 3 (cyclist).
+    """Fabricate a SAM 3 NPZ with three instances: track 0 (car), track 3
+    (cyclist) and track 7 (road).
 
-    instance_seg stores track_id + 1, so track 0 -> 1, track 3 -> 4.
+    instance_seg stores track_id + 1, so track 0 -> 1, track 3 -> 4, track 7 -> 8.
     Returns the arrays written for assertions.
     """
     instance_seg = np.zeros((H, W), dtype=np.int32)
-    instance_seg[1, 1] = 1          # track 0
-    instance_seg[H - 1, W - 1] = 4  # track 3
-    track_ids = np.array([0, 3], dtype=np.int32)
-    label_ids = np.array([0, 2], dtype=np.int32)   # car, cyclist
-    scores    = np.array([0.9, 0.8], dtype=np.float32)
+    instance_seg[1, 1] = 1          # track 0 (car, dynamic)
+    instance_seg[H - 1, W - 1] = 4  # track 3 (cyclist, dynamic)
+    instance_seg[H - 1, 0] = 8      # track 7 (road, static)
+    track_ids = np.array([0, 3, 7], dtype=np.int32)
+    label_ids = np.array([0, 2, 3], dtype=np.int32)   # car, cyclist, road
+    scores    = np.array([0.9, 0.8, 0.95], dtype=np.float32)
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         path,
@@ -99,8 +101,8 @@ def test_segment_ids_are_track_ids_plus_one(sam3_layout):
     paths, _ = sam3_layout
     loader = KITTISam3SequenceLoader(**paths)
     f = loader[0]
-    np.testing.assert_array_equal(f.segment_ids, np.array([1, 4], dtype=np.int32))
-    np.testing.assert_array_equal(f.label_ids, np.array([0, 2], dtype=np.int32))
+    np.testing.assert_array_equal(f.segment_ids, np.array([1, 4, 8], dtype=np.int32))
+    np.testing.assert_array_equal(f.label_ids, np.array([0, 2, 3], dtype=np.int32))
     # segment_ids must be exactly the non-zero values present in panoptic_seg.
     present = set(np.unique(f.panoptic_seg).tolist()) - {0}
     assert set(f.segment_ids.tolist()) == present
@@ -110,13 +112,16 @@ def test_segment_ids_are_track_ids_plus_one(sam3_layout):
 # Static mask
 # ---------------------------------------------------------------------------
 
-def test_static_mask_excludes_every_instance(sam3_layout):
+def test_static_mask_excludes_dynamic_keeps_road(sam3_layout):
     paths, _ = sam3_layout
     loader = KITTISam3SequenceLoader(**paths)
     f = loader[0]
-    # Every instance pixel dropped; every background pixel kept.
-    np.testing.assert_array_equal(f.static_mask, f.panoptic_seg == 0)
-    assert not f.static_mask[f.panoptic_seg > 0].any()
+    # Dynamic instances (car=seg 1, cyclist=seg 4) removed.
+    assert not f.static_mask[f.panoptic_seg == 1].any(), "car must be removed"
+    assert not f.static_mask[f.panoptic_seg == 4].any(), "cyclist must be removed"
+    # Road (seg 8) and background (0) kept.
+    assert f.static_mask[f.panoptic_seg == 8].all(), "road must be kept"
+    assert f.static_mask[f.panoptic_seg == 0].all(), "background must be kept"
 
 
 def test_boundary_margin_erodes_more(sam3_layout):

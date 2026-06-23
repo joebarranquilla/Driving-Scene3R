@@ -24,9 +24,14 @@ import numpy as np
 from PIL import Image
 
 from semantic_gs.data.adapters.depth_npz import DEPTH_KEY
-from semantic_gs.data.adapters.panoptic_npz import PANOPTIC_KEYS
 from semantic_gs.data.adapters.dummy import DummySequenceLoader
 from semantic_gs.data.pointcloud import SemanticPointCloud
+
+# The Frame's per-segment NPZ keys. These mirror the segmentation on-disk
+# contract (instance_seg / segment_ids / label_ids / scores) and are kept here
+# so the KITTI-layout fixture can synthesise per-frame segmentation NPZs for
+# tests without depending on any specific segmentation adapter.
+PANOPTIC_KEYS = ("panoptic_seg", "segment_ids", "label_ids", "scores")
 
 
 # ---------------------------------------------------------------------------

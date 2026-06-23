@@ -1,30 +1,34 @@
 """Strict reader for the SAM 3 instance-segmentation NPZ files + ``concepts.json``.
 
 Contract (from ``scripts/run_sam3_inference.py``):
-    {output_dir}/concepts.json   -> {"0": "car", "1": "pedestrian", "2": "cyclist"}
+    {output_dir}/concepts.json   -> {"0": "car", ..., "3": "road"}
     {output_dir}/{sequence}/{frame_stem}.npz
         "instance_seg" -> int32   (H, W)   (track_id + 1) per pixel (0 = background)
         "track_ids"    -> int32   (N,)     persistent tracking IDs this frame
         "label_ids"    -> int32   (N,)     concept index (into concepts.json)
         "scores"       -> float32 (N,)     detection confidence per instance
 
-SAM 3 only segments the *dynamic* concepts it is prompted with (car,
-pedestrian, cyclist), so every instance in a SAM 3 frame is dynamic. This
-makes the static mask trivial: a pixel is static iff it belongs to no
-instance, i.e. ``instance_seg == 0``. Contrast with the Mask2Former path
-(``panoptic_npz.py`` + ``static_mask.build_static_mask``), which must match
-dynamic *classes by name* because its panoptic output also covers the static
-"stuff" classes (road, building, sky, ...).
+SAM 3 is the project's sole segmentation source. It segments the *prompted*
+concepts only — both DYNAMIC agents (car / pedestrian / cyclist) and at least
+one STATIC concept, the drivable surface (``road``). So "every instance is
+dynamic" is NO LONGER true: the static mask must exclude only the dynamic
+concepts (by name) and KEEP road + unsegmented background.
 
 ``instance_seg`` already satisfies the ``Frame.panoptic_seg`` contract
-(``int32 (H, W)``, ``0`` = void/background), so the SAM 3 → ``Frame`` mapping
-is direct:
+(``int32 (H, W)``, ``0`` = background), so the SAM 3 → ``Frame`` mapping is:
 
     panoptic_seg = instance_seg
     segment_ids  = track_ids + 1   # +1 so values match the instance_seg encoding
     label_ids    = label_ids       # concept indices; id2label = concepts.json
     scores       = scores
-    static_mask  = instance_seg == 0
+    static_mask  = build_static_mask(..., void_is_static=True)  # see below
+
+The static mask reuses ``static_mask.build_static_mask`` (the same name-based
+exclusion used for the old Mask2Former path) with **``void_is_static=True``**:
+SAM 3 only labels prompted concepts, so background (``instance_seg == 0``) is
+the rest of the static scene and must be KEPT (the opposite of Mask2Former,
+where void = uncertain). Only segments whose concept is in the dynamic set are
+removed; road and background stay.
 
 The ``+1`` offset on ``segment_ids`` mirrors the encoding baked into
 ``instance_seg`` (the SAM 3 tracker assigns IDs from 0, which would otherwise
@@ -40,10 +44,22 @@ from pathlib import Path
 
 import numpy as np
 
-from semantic_gs.data.static_mask import semantic_boundary_mask
+from semantic_gs.data.static_mask import build_static_mask
 
 
 SAM3_KEYS = ("instance_seg", "track_ids", "label_ids", "scores")
+
+# SAM 3 prompt concepts that are dynamic agents (removed from the static scene).
+# Name-based (lower-cased) like ``static_mask.DEFAULT_DYNAMIC_CLASSES`` so it is
+# robust to concept re-ordering; uses the SAM 3 prompt vocabulary.
+DEFAULT_SAM3_DYNAMIC_CONCEPTS: frozenset[str] = frozenset({
+    "car", "pedestrian", "cyclist", "truck", "bus", "motorcycle", "bicycle",
+})
+
+# Concept names that denote the drivable surface (robust to phrasing).
+DEFAULT_ROAD_CONCEPTS: frozenset[str] = frozenset({
+    "road", "drivable surface", "street",
+})
 
 
 @dataclass(frozen=True)
@@ -67,28 +83,77 @@ class Sam3Prediction:
         """
         return (self.track_ids + 1).astype(np.int32, copy=False)
 
-    def static_mask(self, boundary_margin: int = 0) -> np.ndarray:
+    def static_mask(
+        self,
+        id2label,
+        dynamic_classes=None,
+        boundary_margin: int = 0,
+    ) -> np.ndarray:
         """Return the ``bool (H, W)`` static mask for GS initialisation.
 
-        A pixel is static iff it belongs to no SAM 3 instance
-        (``instance_seg == 0``). Because every SAM 3 instance is a dynamic
-        agent, this single rule removes all moving objects — no class-name
-        lookup is needed (unlike the Mask2Former path).
+        A pixel is static iff it does NOT belong to a *dynamic* concept
+        instance. Background (``instance_seg == 0``) and static concepts such
+        as ``road`` are kept. Delegates to
+        :func:`~semantic_gs.data.static_mask.build_static_mask` with
+        ``void_is_static=True`` (SAM 3 background is the rest of the static
+        scene, not "uncertain").
 
         Parameters
         ----------
+        id2label
+            Concept-index → name map (``concepts.json``).
+        dynamic_classes
+            Concept names to remove. Defaults to
+            :data:`DEFAULT_SAM3_DYNAMIC_CONCEPTS`. Pass ``frozenset()`` to keep
+            everything.
         boundary_margin
-            If > 0, also discard pixels within this many pixels of any
-            instance boundary. Stereo depth bleeds across instance edges,
-            producing floating artefacts in the back-projected cloud; eroding
-            the boundary is the same cheap fix the Mask2Former path applies
-            (see ``static_mask.build_static_mask``). ``0`` disables it.
+            If > 0, also erode this many pixels around every instance boundary
+            (stereo depth-bleeding fix), same as the Mask2Former path.
         """
-        static = self.instance_seg == 0
-        if boundary_margin > 0:
-            boundary = semantic_boundary_mask(self.instance_seg, boundary_margin)
-            static = static & ~boundary
-        return static.astype(bool, copy=False)
+        return build_static_mask(
+            panoptic_seg     = self.instance_seg,
+            segment_ids      = self.segment_ids,
+            label_ids        = self.label_ids,
+            id2label         = id2label,
+            dynamic_classes  = (dynamic_classes if dynamic_classes is not None
+                                else DEFAULT_SAM3_DYNAMIC_CONCEPTS),
+            void_is_static   = True,
+            boundary_margin  = boundary_margin,
+        )
+
+    def concept_mask(self, concept_name: str, id2label) -> np.ndarray:
+        """Return a ``bool (H, W)`` mask of all instances of ``concept_name``.
+
+        Unions every segment whose concept (resolved via ``id2label``) matches
+        ``concept_name`` (case-insensitive). SAM 3 often splits a "stuff"
+        concept like the road into several instances/lanes — they are all
+        merged here, so lane-splitting does not matter.
+        """
+        target = concept_name.lower()
+        matching_label_ids = {
+            int(lid) for lid, name in id2label.items()
+            if str(name).lower() == target
+        }
+        if not matching_label_ids:
+            return np.zeros(self.instance_seg.shape, dtype=bool)
+        seg_ids = [
+            int(t) + 1 for t, l in zip(self.track_ids, self.label_ids)
+            if int(l) in matching_label_ids
+        ]
+        if not seg_ids:
+            return np.zeros(self.instance_seg.shape, dtype=bool)
+        return np.isin(self.instance_seg, np.asarray(seg_ids, dtype=np.int32))
+
+    def road_mask(self, id2label, road_names=DEFAULT_ROAD_CONCEPTS) -> np.ndarray:
+        """Return a ``bool (H, W)`` mask of the drivable surface.
+
+        ORs :meth:`concept_mask` over every name in ``road_names`` so it works
+        regardless of which road phrasing was prompted.
+        """
+        mask = np.zeros(self.instance_seg.shape, dtype=bool)
+        for name in road_names:
+            mask |= self.concept_mask(name, id2label)
+        return mask
 
 
 def load_sam3_npz(path: str | Path) -> Sam3Prediction:
@@ -134,7 +199,7 @@ def load_concepts_json(path: str | Path) -> dict[int, str]:
     """Load the SAM 3 ``concepts.json`` (string-keyed) as a ``dict[int, str]``.
 
     This is the SAM 3 analogue of Mask2Former's ``id2label.json``: it maps
-    each ``label_ids`` value to its concept name (e.g. ``{0: "car"}``).
+    each ``label_ids`` value to its concept name (e.g. ``{0: "car", 3: "road"}``).
     """
     path = Path(path)
     if not path.is_file():

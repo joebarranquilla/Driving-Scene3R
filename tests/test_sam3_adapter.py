@@ -29,8 +29,12 @@ def _write_sam3_npz(path, instance_seg, track_ids, label_ids, scores):
     )
 
 
+# Concept map used across the static-mask tests: car is dynamic, road is static.
+CONCEPTS = {0: "car", 3: "road"}
+
+
 def _toy_frame():
-    """A 4x5 frame with two instances: track 0 (car) and track 4 (car).
+    """A 4x5 frame with two instances: track 0 (car, dynamic) and track 4 (road).
 
     instance_seg stores track_id + 1, so track 0 -> 1, track 4 -> 5.
     """
@@ -44,7 +48,7 @@ def _toy_frame():
         dtype=np.int32,
     )
     track_ids = np.array([0, 4], dtype=np.int32)
-    label_ids = np.array([0, 0], dtype=np.int32)
+    label_ids = np.array([0, 3], dtype=np.int32)   # car (dynamic), road (static)
     scores = np.array([0.84, 0.95], dtype=np.float32)
     return instance_seg, track_ids, label_ids, scores
 
@@ -139,33 +143,67 @@ def test_segment_ids_offset_matches_instance_seg(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Static mask
+# Static mask (concept-aware: exclude dynamic, keep road + background)
 # ---------------------------------------------------------------------------
 
-def test_static_mask_excludes_all_instances(tmp_path):
+def _toy_pred(tmp_path):
     instance_seg, track_ids, label_ids, scores = _toy_frame()
     p = tmp_path / "000000.npz"
     _write_sam3_npz(p, instance_seg, track_ids, label_ids, scores)
-    pred = load_sam3_npz(p)
+    return load_sam3_npz(p)
 
-    mask = pred.static_mask()
+
+def test_static_mask_excludes_dynamic_keeps_road(tmp_path):
+    pred = _toy_pred(tmp_path)
+    mask = pred.static_mask(id2label=CONCEPTS)
     assert mask.dtype == np.bool_
-    assert mask.shape == instance_seg.shape
-    # Every instance pixel is removed; every background pixel is kept.
-    np.testing.assert_array_equal(mask, instance_seg == 0)
+    assert mask.shape == pred.instance_seg.shape
+    # Car (seg value 1) removed; road (seg value 5) and background (0) kept.
+    assert not mask[pred.instance_seg == 1].any(), "car pixels must be removed"
+    assert mask[pred.instance_seg == 5].all(), "road pixels must be kept"
+    assert mask[pred.instance_seg == 0].all(), "background must be kept"
+
+
+def test_void_is_static_keeps_background(tmp_path):
+    pred = _toy_pred(tmp_path)
+    mask = pred.static_mask(id2label=CONCEPTS)
+    # Background is the majority here; SAM 3 void = static, never dropped.
+    np.testing.assert_array_equal(mask[pred.instance_seg == 0],
+                                  np.ones((pred.instance_seg == 0).sum(), dtype=bool))
+
+
+def test_static_mask_empty_dynamic_set_keeps_everything(tmp_path):
+    pred = _toy_pred(tmp_path)
+    mask = pred.static_mask(id2label=CONCEPTS, dynamic_classes=frozenset())
+    assert mask.all(), "with no dynamic concepts, every pixel is static"
 
 
 def test_static_mask_boundary_margin_erodes_more(tmp_path):
-    instance_seg, track_ids, label_ids, scores = _toy_frame()
-    p = tmp_path / "000000.npz"
-    _write_sam3_npz(p, instance_seg, track_ids, label_ids, scores)
-    pred = load_sam3_npz(p)
-
-    base = pred.static_mask(boundary_margin=0)
-    eroded = pred.static_mask(boundary_margin=1)
+    pred = _toy_pred(tmp_path)
+    base = pred.static_mask(id2label=CONCEPTS, boundary_margin=0)
+    eroded = pred.static_mask(id2label=CONCEPTS, boundary_margin=1)
     # Boundary erosion can only remove static pixels, never add them.
     assert eroded.sum() <= base.sum()
     assert not np.any(eroded & ~base)
+
+
+# ---------------------------------------------------------------------------
+# Concept / road masks
+# ---------------------------------------------------------------------------
+
+def test_concept_mask_matches_by_name(tmp_path):
+    pred = _toy_pred(tmp_path)
+    car = pred.concept_mask("car", CONCEPTS)
+    np.testing.assert_array_equal(car, pred.instance_seg == 1)
+    # Case-insensitive.
+    np.testing.assert_array_equal(pred.concept_mask("CAR", CONCEPTS), car)
+    # Unknown concept -> empty mask.
+    assert not pred.concept_mask("sky", CONCEPTS).any()
+
+
+def test_road_mask(tmp_path):
+    pred = _toy_pred(tmp_path)
+    np.testing.assert_array_equal(pred.road_mask(CONCEPTS), pred.instance_seg == 5)
 
 
 # ---------------------------------------------------------------------------

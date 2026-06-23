@@ -182,7 +182,7 @@ def parse_args():
 # Concept loading
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CONCEPTS = ["car", "pedestrian", "cyclist"]
+_DEFAULT_CONCEPTS = ["car", "pedestrian", "cyclist", "road"]
 _DEFAULT_CONCEPTS_FILE = os.path.join(os.path.dirname(__file__), "..", "concepts.txt")
 
 

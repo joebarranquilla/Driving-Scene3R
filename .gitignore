@@ -45,3 +45,13 @@ build/
 # Claude Code
 .claude/
 CLAUDE.md
+
+# --- semantic_gs module additions ------------------------------------------
+# The generic `data/` rule above otherwise hides our package's data subpackage.
+!semantic_gs/data/
+!semantic_gs/data/**
+# ...but the re-include above also resurrects __pycache__ under that tree; drop it again.
+semantic_gs/data/**/__pycache__/
+
+# Phase 0 smoke-test artefacts (regenerable; never commit).
+smoke_test_out/

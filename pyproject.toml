@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semantic-gs"
+version = "0.1.0"
+description = "Semantic Gaussian 3D Splatting module for Driving-Scene3R"
+requires-python = ">=3.10"
+# Production deployment is Linux + NVIDIA CUDA. gsplat is therefore a
+# hard dep (no CPU fallback exists). plyfile is the standard PLY I/O
+# library and lets us delete ~120 LOC of hand-rolled header parsing.
+dependencies = [
+    "numpy>=1.24,<2.0",
+    "pillow>=10.0",
+    "matplotlib>=3.7",
+    "pyyaml>=6.0",
+    "scipy>=1.10",
+    "plyfile>=1.0",
+    "torch>=2.1,<3.0",
+    "gsplat>=1.4,<2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+include = ["semantic_gs*"]
+exclude = ["tests*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+

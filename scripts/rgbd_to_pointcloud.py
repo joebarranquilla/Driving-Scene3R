@@ -160,14 +160,14 @@ def parse_kitti_calib(path):
     return calib
 
 def main():
-    calib = parse_kitti_calib("../calib.txt")
+    calib = parse_kitti_calib("calib.txt")
 
     P2 = calib["P2"]      
     fx, fy = P2[0, 0], P2[1, 1]
     cx, cy = P2[0, 2], P2[1, 2]
 
-    rgb   = load_rgb("../000000.png")
-    depth = load_depth("../000000.npz")
+    rgb   = load_rgb("000000.png")
+    depth = load_depth("000000_old.npz")
     H, W  = depth.shape
     depth_scale = 1
 
@@ -177,7 +177,7 @@ def main():
         depth_trunc=80.0,
     )
 
-    save_ply(points, colors, "../output.ply")
+    save_ply(points, colors, "output.ply")
 
 if __name__ == "__main__":
     main()

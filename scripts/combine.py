@@ -3,6 +3,8 @@ from plyfile import PlyData, PlyElement
 from scipy.spatial.transform import Rotation as R
 import os
 import pandas as pd
+import argparse
+import json
 
 
 def load_P_from_calib(calib_path: str, key: str = "P2") -> np.ndarray:
@@ -189,7 +191,6 @@ def merge_scenes(world_path, object_path, output_path, translation=[0, 0, 0], ro
     PlyData([el]).write(output_path)
     print(f"Successfully created: {output_path}")
 
-
 def place_object_from_mask(
     world_path: str,
     object_path: str,
@@ -270,57 +271,163 @@ def debug_and_visualize(xs, ys, zs, K, T_wc, object_ply, img_path=None, out_img=
         img.save(out_img)
         print(f"Saved debug image: {out_img}")
 
+    # The script can optionally place the object from an optimal_trajectory.json
+    # Use the --coords_source=json CLI flag to enable this behaviour.
+
+
+def place_object_from_trajectory_json(world_path: str, object_path: str, output_path: str, json_path: str, rotation_deg=[0.0, 0.0, 0.0]):
+    """Place the object at the chosen (x,y,z) step from an optimal_trajectory.json file
+
+    and automatically apply the matching heading rotation (theta).
+    """
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(json_path)
+    with open(json_path, 'r') as fh:
+        jd = json.load(fh)
+
+    traj = jd.get('trajectory')
+    if traj is None:
+        raise KeyError('trajectory field not found in JSON')
+
+    xs = traj.get('x')
+    ys = traj.get('y')
+    zs = traj.get('z')
+    thetas = traj.get('theta')  # <--- Extract the theta array
+    
+    if xs is None or ys is None or zs is None or thetas is None:
+        raise KeyError('trajectory must contain x, y, z, and theta arrays')
+
+    if len(xs) == 0 or len(ys) == 0 or len(zs) == 0:
+        raise ValueError('Empty trajectory arrays in JSON')
+
+    # Choose trajectory index (matching your original step selection)
+    chosen_idx = 10 if len(xs) > 10 else 0
+    target = np.array([float(xs[chosen_idx]), float(ys[chosen_idx]), float(zs[chosen_idx])], dtype=np.float32)
+
+    # --- NEW: Extract theta for the chosen step and convert to degrees ---
+    theta_rad = float(thetas[chosen_idx])
+    theta_deg = np.degrees(theta_rad) 
+    
+    # Map to the Y axis slot for the 'xyz' euler sequence
+    rotation_deg = [0.0, theta_deg, 0.0]
+    print(f"-> Extracted heading rotation: {theta_rad:.4f} rad ({theta_deg:.2f} deg) at step {chosen_idx}")
+
+    # Snap Y to the local road surface so the object is always on/above the street.
+    try:
+        world_ply = PlyData.read(world_path)
+        wv = world_ply['vertex']
+        world_xyz = np.stack([wv['x'], wv['y'], wv['z']], axis=-1)
+        try:
+            from scipy.spatial import cKDTree
+            tree = cKDTree(world_xyz[:, [0, 2]])
+            k = min(8, len(world_xyz))
+            _, idxs = tree.query(np.array([[target[0], target[2]]]), k=k, workers=-1)
+            idxs = idxs[0] if k > 1 else np.atleast_1d(idxs[0])
+        except Exception:
+            dists = np.linalg.norm(world_xyz[:, [0, 2]] - np.array([target[0], target[2]]), axis=1)
+            k = min(8, len(world_xyz))
+            idxs = np.argsort(dists)[:k]
+
+        local_world_ys = world_xyz[idxs, 1]
+        local_world_y = float(np.mean(local_world_ys))
+        if target[1] + 1.2 > local_world_y:
+            print(f"    [info] Adjusting JSON target Y {target[1]:.4f} -> {local_world_y:.4f} to sit on/above road surface")
+            target[1] = local_world_y - 1.2  
+    except Exception as e:
+        print(f"    [warn] Could not snap target to local road height: {e}")
+
+    # Compute dynamic scaling similarly to mask-based placement
+    raw_obj_centroid = compute_centroid_of_ply(object_path)
+    plydata = PlyData.read(object_path)
+    v = plydata['vertex']
+    raw_xyz = np.stack([v['x'], v['y'], v['z']], axis=-1)
+    extents = raw_xyz.max(axis=0) - raw_xyz.min(axis=0)
+    longest_side = np.max(extents)
+
+    target_car_size = 4.5
+    scale_factor = target_car_size / longest_side if longest_side > 0 else 1.0
+
+    print(f"-> Placing object at JSON point: {target}")
+    print(f"-> Calculated dynamic scale factor: {scale_factor:.4f}")
+
+    # Execute merge with dynamic scaling and automatic rotation configurations
+    merge_scenes(
+        world_path,
+        object_path,
+        output_path,
+        translation=target.tolist(),
+        rotation=rotation_deg,  # <--- Passes the auto-calculated yaw vector
+        scale=scale_factor,
+    )
+
+
+def _parse_args_and_run():
+    p = argparse.ArgumentParser(description='Merge object into world; choose coords source (csv or json).')
+    p.add_argument('--coords_source', choices=['csv', 'json'], default='csv', help='Where to read target coordinates from')
+    p.add_argument('--csv_path', default='000000_obj5_xyz.csv', help='CSV file path when using csv source')
+    p.add_argument('--json_path', default='optimal_trajectory.json', help='JSON file path when using json source')
+    p.add_argument('--world_ply', default='../gaussians.ply')
+    p.add_argument('--object_ply', default='../sam-3d-objects/notebook/gaussians/new_mask_seq4_posed.ply')
+    p.add_argument('--out_ply', default='merged_with_car.ply')
+    p.add_argument('--calib_path', default='/storage/group/dataset_mirrors/kitti_odom_color/data_odometry_color/dataset/sequences/04/calib.txt')
+    args = p.parse_args()
+
+    world_ply = args.world_ply
+    object_ply = args.object_ply
+    out_ply = args.out_ply
+
+    K = load_P_from_calib(args.calib_path, key='P2')
+
+    if args.coords_source == 'csv':
+        data = pd.read_csv(args.csv_path)
+        xs = data['u'].values; ys = data['v'].values; zs = data['z'].values
+        print(f"Loaded {len(xs)} pixels from CSV: {args.csv_path}")
+
+        # load first pose as before
+        pose_file = "/storage/group/dataset_mirrors/kitti_odom_color/data_odometry_color/dataset/sequences/04/04.txt"
+        vals = np.loadtxt(pose_file)
+        if vals.ndim == 1:
+            flat = vals
+            if flat.size % 12 == 0:
+                mats = flat.reshape(-1, 3, 4)
+                T0 = np.eye(4)
+                T0[:3, :4] = mats[0]
+            elif flat.size % 16 == 0:
+                mats = flat.reshape(-1, 4, 4)
+                T0 = mats[0]
+        else:
+            if vals.shape[1] == 12:
+                mats = vals.reshape(-1, 3, 4)
+                T0 = np.eye(4)
+                T0[:3, :4] = mats[0]
+            elif vals.shape[1] == 16:
+                mats = vals.reshape(-1, 4, 4)
+                T0 = mats[0]
+
+        pts_cam = backproject_pixels_to_camera(xs.astype(float), ys.astype(float), zs.astype(float), K)
+        pts_w = transform_points_camera_to_world(pts_cam, T0)
+        norm1 = np.linalg.norm(pts_w.mean(axis=0))
+        try:
+            T0_inv = np.linalg.inv(T0)
+            pts_w_inv = transform_points_camera_to_world(pts_cam, T0_inv)
+            norm2 = np.linalg.norm(pts_w_inv.mean(axis=0))
+        except np.linalg.LinAlgError:
+            norm2 = np.inf
+
+        if norm2 < norm1:
+            T_wc = T0_inv
+            print("Inverted pose matrix based on spatial heuristic")
+        else:
+            T_wc = T0
+
+        img_path = os.path.join(os.path.dirname(pose_file), "image_2", "000000.png")
+        debug_and_visualize(xs, ys, zs, K, T_wc, object_ply, img_path=img_path, out_img="debug_reproj.png")
+        place_object_from_mask(world_ply, object_ply, out_ply, xs, ys, zs, K, T_wc, rotation_deg=[0,0,0])
+
+    else:
+        # json source
+        place_object_from_trajectory_json(world_ply, object_ply, out_ply, args.json_path, rotation_deg=[0,0,0])
+
 
 if __name__ == "__main__":
-    world_ply   = "../gaussians.ply"
-    object_ply  = "../sam-3d-objects/notebook/gaussians/new_mask_seq4_posed.ply"
-    out_ply     = "merged_with_car.ply"
-    calib_path  = "/storage/group/dataset_mirrors/kitti_odom_color/data_odometry_color/dataset/sequences/04/calib.txt"
-    
-    K = load_P_from_calib(calib_path, key="P2")
-
-    data = pd.read_csv("000000_obj5_xyz.csv")
-    xs = data['u'].values; ys = data['v'].values; zs = data['z'].values
-    print(f"Loaded {len(xs)} pixels from CSV")
-
-    pose_file = "/storage/group/dataset_mirrors/kitti_odom_color/data_odometry_color/dataset/sequences/04/04.txt"
-    vals = np.loadtxt(pose_file)
-    if vals.ndim == 1:
-        flat = vals
-        if flat.size % 12 == 0:
-            mats = flat.reshape(-1, 3, 4)
-            T0 = np.eye(4)
-            T0[:3, :4] = mats[0]
-        elif flat.size % 16 == 0:
-            mats = flat.reshape(-1, 4, 4)
-            T0 = mats[0]
-    else:
-        if vals.shape[1] == 12:
-            mats = vals.reshape(-1, 3, 4)
-            T0 = np.eye(4)
-            T0[:3, :4] = mats[0]
-        elif vals.shape[1] == 16:
-            mats = vals.reshape(-1, 4, 4)
-            T0 = mats[0]
-
-    pts_cam = backproject_pixels_to_camera(xs.astype(float), ys.astype(float), zs.astype(float), K)
-    pts_w = transform_points_camera_to_world(pts_cam, T0)
-    norm1 = np.linalg.norm(pts_w.mean(axis=0))
-    try:
-        T0_inv = np.linalg.inv(T0)
-        pts_w_inv = transform_points_camera_to_world(pts_cam, T0_inv)
-        norm2 = np.linalg.norm(pts_w_inv.mean(axis=0))
-    except np.linalg.LinAlgError:
-        norm2 = np.inf
-
-    if norm2 < norm1:
-        T_wc = T0_inv
-        print("Inverted pose matrix based on spatial heuristic")
-    else:
-        T_wc = T0
-
-    img_path = os.path.join(os.path.dirname(pose_file), "image_2", "000000.png")
-    debug_and_visualize(xs, ys, zs, K, T_wc, object_ply, img_path=img_path, out_img="debug_reproj.png")
-
-    # Run execution with corrected pipeline
-    place_object_from_mask(world_ply, object_ply, out_ply, xs, ys, zs, K, T_wc, rotation_deg=[0,0,0])
+    _parse_args_and_run()

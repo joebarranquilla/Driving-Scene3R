@@ -46,6 +46,49 @@ def _rgb_to_sh0_dc(rgb: np.ndarray) -> np.ndarray:
     return (rgb - 0.5) / _SH_C0
 
 
+def load_gaussian_ply(path: str | Path) -> dict[str, np.ndarray]:
+    """Read an Inria-format gaussian PLY into render-ready numpy arrays.
+
+    The exact inverse of :func:`save_gaussians_ply`: f_dc -> RGB,
+    logit -> opacity, log -> scale, raw -> normalized quat (wxyz). Files that
+    additionally carry ``uchar red/green/blue`` (e.g. SAM 3D Objects assets)
+    use those colors directly.
+
+    Returns ``{"means", "colors", "opacities", "scales", "quats"}`` — the
+    activated values a rasterizer consumes, all float32.
+    """
+    from plyfile import PlyData  # local import: only needed when reading
+
+    v = PlyData.read(str(path))["vertex"]
+    names = {pr.name for pr in v.properties}
+    required = {"x", "y", "z", "opacity", "scale_0", "scale_1", "scale_2",
+                "rot_0", "rot_1", "rot_2", "rot_3"}
+    missing = sorted(required - names)
+    if missing:
+        raise ValueError(f"{path}: not a gaussian PLY, missing {missing}")
+
+    means = np.stack([v["x"], v["y"], v["z"]], -1).astype(np.float32)
+
+    if {"red", "green", "blue"} <= names:
+        colors = np.stack([v["red"], v["green"], v["blue"]], -1) / 255.0
+    else:
+        f_dc = np.stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], -1)
+        colors = np.clip(f_dc * _SH_C0 + 0.5, 0.0, 1.0)
+
+    opacities = 1.0 / (1.0 + np.exp(-np.asarray(v["opacity"], dtype=np.float64)))
+    scales = np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], -1))
+    quats = np.stack([v["rot_0"], v["rot_1"], v["rot_2"], v["rot_3"]], -1)
+    quats = quats / np.maximum(np.linalg.norm(quats, axis=1, keepdims=True), 1e-12)
+
+    return {
+        "means":     means,
+        "colors":    colors.astype(np.float32),
+        "opacities": opacities.astype(np.float32),
+        "scales":    scales.astype(np.float32),
+        "quats":     quats.astype(np.float32),   # wxyz
+    }
+
+
 @torch.no_grad()
 def save_gaussians_ply(model: GaussianModel, path: str | Path) -> None:
     """Write the model to a binary-little-endian PLY in Inria 3DGS format."""

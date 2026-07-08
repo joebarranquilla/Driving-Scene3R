@@ -55,3 +55,6 @@ semantic_gs/data/**/__pycache__/
 
 # Phase 0 smoke-test artefacts (regenerable; never commit).
 smoke_test_out/
+
+# Local visualization experiments (kept out of the shared repo)
+visualization/

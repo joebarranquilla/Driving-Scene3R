@@ -6,11 +6,20 @@ Examples
     # Pure synthetic data — no teammate output, no datasets needed.
     python -m semantic_gs.scripts.smoke_test_adapters --dummy --out smoke_test_out
 
-    # Real KITTI odometry (Phase 1):
+    # Real KITTI odometry, Mask2Former masks (the default --seg-source):
     python -m semantic_gs.scripts.smoke_test_adapters \\
         --kitti-odom-seq /storage/.../sequences/04 \\
         --depth-dir      /storage/user/<user>/depth_predictions/04 \\
         --pano-dir       /storage/user/<user>/panoptic_predictions/04 \\
+        --pose-path      /storage/.../poses/04.txt \\
+        --frames 0 50 100 --out smoke_test_out
+
+    # Real KITTI odometry, SAM 3 masks:
+    python -m semantic_gs.scripts.smoke_test_adapters \\
+        --seg-source     sam3 \\
+        --kitti-odom-seq /storage/.../sequences/04 \\
+        --depth-dir      /storage/user/<user>/depth_predictions/04 \\
+        --sam3-dir       /storage/user/<user>/sam3_predictions/04 \\
         --pose-path      /storage/.../poses/04.txt \\
         --frames 0 50 100 --out smoke_test_out
 """
@@ -24,7 +33,7 @@ from pathlib import Path
 import numpy as np
 
 from semantic_gs.data.adapters.dummy import DummySequenceLoader
-from semantic_gs.data.adapters.kitti_odom_sam3 import KITTISam3SequenceLoader
+from semantic_gs.data.adapters.factory import build_kitti_loader
 from semantic_gs.data.dataset import SequenceLoader
 from semantic_gs.data.frame import Frame
 
@@ -49,15 +58,30 @@ def _parse_args() -> argparse.Namespace:
                           "(must contain image_2/ and calib.txt).")
 
     # --- KITTI-only flags (validated only if --kitti-odom-seq is used) ---
+    p.add_argument("--seg-source", choices=("mask2former", "sam3"),
+                   default="mask2former",
+                   help="(KITTI) segmentation source for the static mask. "
+                        "'mask2former' uses --pano-dir; 'sam3' uses --sam3-dir.")
     p.add_argument("--depth-dir",  metavar="DIR",
                    help="(KITTI) directory with per-frame depth .npz files.")
+    p.add_argument("--pano-dir",   metavar="DIR",
+                   help="(KITTI) directory with per-frame Mask2Former panoptic "
+                        ".npz files (--seg-source mask2former).")
     p.add_argument("--sam3-dir",   metavar="DIR",
-                   help="(KITTI) directory with per-frame SAM 3 .npz files.")
+                   help="(KITTI) directory with per-frame SAM 3 .npz files "
+                        "(--seg-source sam3).")
     p.add_argument("--pose-path",  metavar="FILE",
                    help="(KITTI) per-sequence poses .txt file.")
+    p.add_argument("--id2label",   metavar="FILE", default=None,
+                   help="(KITTI) optional override for id2label.json. "
+                        "Defaults to <pano-dir>/../id2label.json.")
     p.add_argument("--concepts-path", metavar="FILE", default=None,
                    help="(KITTI) optional override for concepts.json. "
                         "Defaults to <sam3-dir>/../concepts.json.")
+    p.add_argument("--boundary-margin", type=int, default=0,
+                   help="(KITTI) px eroded around instance/segment edges — "
+                        "matches train_gs so the smoke test exercises the "
+                        "same loader config as training.")
     p.add_argument("--camera-index", type=int, default=2, choices=(2, 3),
                    help="(KITTI) which P_i to use (2 = image_2, 3 = image_3).")
 
@@ -71,17 +95,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-viz", action="store_true",
                    help="Skip writing the PNGs (only print the contract).")
 
-    args = p.parse_args()
-
-    if args.kitti_odom_seq:
-        missing = [name for name, val in
-                   (("--depth-dir", args.depth_dir),
-                    ("--sam3-dir",  args.sam3_dir),
-                    ("--pose-path", args.pose_path))
-                   if val is None]
-        if missing:
-            p.error(f"--kitti-odom-seq requires: {', '.join(missing)}")
-    return args
+    # Required-flag validation happens in build_kitti_loader (shared with
+    # train_gs) so both entry points report identical errors.
+    return p.parse_args()
 
 
 # ---------------------------------------------------------------------------
@@ -168,14 +184,21 @@ def _save_viz(loader: SequenceLoader, frame: Frame, out_path: Path) -> None:
 def _build_loader(args: argparse.Namespace) -> SequenceLoader:
     if args.dummy:
         return DummySequenceLoader(num_frames=args.num_frames)
-    return KITTISam3SequenceLoader(
-        sequence_dir   = args.kitti_odom_seq,
-        depth_dir      = args.depth_dir,
-        sam3_dir       = args.sam3_dir,
-        pose_path      = args.pose_path,
-        concepts_path  = args.concepts_path,
-        camera_index   = args.camera_index,
-    )
+    try:
+        return build_kitti_loader(
+            args.seg_source,
+            sequence_dir    = args.kitti_odom_seq,
+            depth_dir       = args.depth_dir,
+            pose_path       = args.pose_path,
+            pano_dir        = args.pano_dir,
+            sam3_dir        = args.sam3_dir,
+            id2label_path   = args.id2label,
+            concepts_path   = args.concepts_path,
+            camera_index    = args.camera_index,
+            boundary_margin = args.boundary_margin,
+        )
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
 
 
 def main() -> int:

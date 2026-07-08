@@ -77,3 +77,24 @@ class PinholeCamera:
             cy=float(P[1, 2]),
         )
 
+
+
+def unproject_pixels(
+    cam: PinholeCamera,
+    u: np.ndarray,
+    v: np.ndarray,
+    depth: np.ndarray,
+) -> np.ndarray:
+    """Back-project pixel coordinates + metric depth into camera space.
+
+    ``u``/``v`` are column/row pixel indices, ``depth`` the metric Z per
+    pixel. Returns ``(N, 3)`` float64 points in the OpenCV camera frame
+    (+X right, +Y down, +Z forward). The single shared implementation of the
+    pinhole inverse used by the init-cloud and trajectory tooling.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    z = np.asarray(depth, dtype=np.float64)
+    x = (u - cam.cx) * z / cam.fx
+    y = (v - cam.cy) * z / cam.fy
+    return np.stack([x, y, z], axis=-1)

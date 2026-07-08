@@ -2,8 +2,18 @@
 
 Examples
 --------
+    # Real KITTI (Mask2Former segmentation, the default --seg-source):
+    python -m semantic_gs.scripts.train_gs \\
+        --kitti-odom-seq /storage/.../sequences/04 \\
+        --depth-dir      /usr/prakt/<u>/depth_predictions/04 \\
+        --pano-dir       /usr/prakt/<u>/panoptic_predictions/04 \\
+        --pose-path      /storage/.../sequences/04/04.txt \\
+        --init-pc        /usr/prakt/<u>/semantic_clouds/seq04_static.npz \\
+        --out            /usr/prakt/<u>/semantic_gs_runs/seq04
+
     # Real KITTI (SAM 3 segmentation):
     python -m semantic_gs.scripts.train_gs \\
+        --seg-source     sam3 \\
         --kitti-odom-seq /storage/.../sequences/04 \\
         --depth-dir      /usr/prakt/<u>/depth_predictions/04 \\
         --sam3-dir       /usr/prakt/<u>/sam3_predictions/04 \\
@@ -27,7 +37,7 @@ from pathlib import Path
 import torch
 
 from semantic_gs.data.adapters.dummy import DummySequenceLoader
-from semantic_gs.data.adapters.kitti_odom_sam3 import KITTISam3SequenceLoader
+from semantic_gs.data.adapters.factory import build_kitti_loader
 from semantic_gs.data.adapters.semantic_pointcloud_npz import (
     load_semantic_pointcloud_npz,
 )
@@ -61,14 +71,25 @@ def _parse_args() -> argparse.Namespace:
     )
 
     # KITTI-only flags ----------------------------------------------------
+    p.add_argument("--seg-source", choices=("mask2former", "sam3"),
+                   default="mask2former",
+                   help="Per-frame segmentation source for the static mask. "
+                        "'mask2former' uses --pano-dir; 'sam3' uses --sam3-dir.")
     p.add_argument("--depth-dir",    metavar="DIR")
+    p.add_argument("--pano-dir",     metavar="DIR",
+                   help="Mask2Former panoptic dir (--seg-source mask2former).")
     p.add_argument("--sam3-dir",     metavar="DIR",
-                   help="SAM 3 prediction dir (output of run_sam3_inference.py).")
+                   help="SAM 3 prediction dir (--seg-source sam3; "
+                        "output of run_sam3_inference.py).")
     p.add_argument("--pose-path",    metavar="FILE")
+    p.add_argument("--id2label",     metavar="FILE", default=None,
+                   help="Mask2Former id2label.json; defaults to "
+                        "--pano-dir/../id2label.json (--seg-source mask2former).")
     p.add_argument("--concepts-path", metavar="FILE", default=None,
                    help="SAM 3 concepts.json; defaults to --sam3-dir/../concepts.json.")
     p.add_argument("--boundary-margin", type=int, default=0,
-                   help="Px to erode around instance/segment edges.")
+                   help="Px to erode around instance/segment edges "
+                        "(--seg-source sam3).")
     p.add_argument("--camera-index", type=int, default=2, choices=(2, 3))
 
     # Init point cloud (required for KITTI; defaults to synthetic for dummy)
@@ -104,24 +125,21 @@ def _build_loader(args: argparse.Namespace) -> SequenceLoader:
     if args.dummy:
         return DummySequenceLoader(num_frames=5)
 
-    missing = [name for name, val in
-               (("--depth-dir", args.depth_dir),
-                ("--sam3-dir",  args.sam3_dir),
-                ("--pose-path", args.pose_path))
-               if val is None]
-    if missing:
-        raise SystemExit(
-            f"--kitti-odom-seq requires {missing}; pass them on the CLI."
+    try:
+        return build_kitti_loader(
+            args.seg_source,
+            sequence_dir    = args.kitti_odom_seq,
+            depth_dir       = args.depth_dir,
+            pose_path       = args.pose_path,
+            pano_dir        = args.pano_dir,
+            sam3_dir        = args.sam3_dir,
+            id2label_path   = args.id2label,
+            concepts_path   = args.concepts_path,
+            camera_index    = args.camera_index,
+            boundary_margin = args.boundary_margin,
         )
-    return KITTISam3SequenceLoader(
-        sequence_dir    = args.kitti_odom_seq,
-        depth_dir       = args.depth_dir,
-        sam3_dir        = args.sam3_dir,
-        pose_path       = args.pose_path,
-        concepts_path   = args.concepts_path,
-        camera_index    = args.camera_index,
-        boundary_margin = args.boundary_margin,
-    )
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
 
 
 def _build_init_pc(

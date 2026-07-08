@@ -7,9 +7,11 @@
 # ---------------------
 # Stages 1-3  : one-time setup (conda env, MSNet repo, MSNet checkpoint check)
 # Stages 4-6  : generate the teammate inputs your module consumes
-#                 4) Mask2Former panoptic NPZs   (GPU,  ~5-10 min for seq 04)
+#                 4) segmentation NPZs — Mask2Former (default) or SAM 3,
+#                    selected via --seg-source       (GPU,  ~5-10 min for seq 04)
 #                 5) MobileStereoNet depth NPZs  (GPU,  ~5-10 min for seq 04)
-#                 6) lift_to_semantic_pointcloud.py  →  PLY + NPZ  (CPU, ~30 s)
+#                 6) init static cloud (CPU): lift_to_semantic_pointcloud.py
+#                    (mask2former) or semantic_gs init_pc_from_loader (sam3)
 # Stages 7-10 : >>> THE ACTUAL TESTS OF *YOUR* CODE <<<
 #                 7) Phase 0  — pytest hermetic test suite              (CPU, ~5 s)
 #                 8) Phase 1  — smoke_test_adapters on real KITTI       (CPU, ~10 s)
@@ -202,6 +204,8 @@ OUT_DIR="$AFM_ROOT/outputs"
 MSNET_REPO="$AFM_ROOT/mobilestereonet"
 MSNET_CKPT="$AFM_ROOT/checkpoints/MSNet2D_SF_KITTI2015.ckpt"
 HF_HOME_DIR="$AFM_ROOT/hf_cache"
+SEG_SOURCE="mask2former"   # segmentation source: mask2former | sam3
+SAM3_CKPT="$HOME/checkpoints/sam3/sam3.pt"
 SKIP_SETUP=0
 SKIP_GEN=0
 SKIP_TRAIN=0
@@ -230,6 +234,14 @@ Options:
       --force-venv        Always use venv, even if conda is available
       --msnet-repo DIR    MobileStereoNet repo (default: $MSNET_REPO)
       --msnet-ckpt FILE   MSNet2D checkpoint (default: $MSNET_CKPT)
+      --seg-source SRC    Segmentation source: mask2former | sam3
+                          (default: $SEG_SOURCE). sam3 swaps Stage 4 to
+                          run_sam3_inference.py, Stage 6 to
+                          semantic_gs.scripts.init_pc_from_loader, and passes
+                          --seg-source sam3 to Stages 8/10. SAM 3 outputs use
+                          separate dirs (…/sam3_predictions, seq<SEQ>_sam3_*)
+                          so both pipelines can coexist.
+      --sam3-ckpt FILE    SAM 3 weights (default: $SAM3_CKPT)
       --data-root DIR     KITTI sequences dir (default: $DATA_ROOT)
       --poses-root DIR    KITTI poses dir (default: auto-detect sibling
                           data_odometry_poses/dataset/poses). The lift
@@ -263,6 +275,8 @@ while [[ $# -gt 0 ]]; do
     --force-venv)         FORCE_VENV=1; shift ;;
     --msnet-repo)         MSNET_REPO="$2"; shift 2 ;;
     --msnet-ckpt)         MSNET_CKPT="$2"; shift 2 ;;
+    --seg-source)         SEG_SOURCE="$2"; shift 2 ;;
+    --sam3-ckpt)          SAM3_CKPT="$2"; shift 2 ;;
     --data-root)          DATA_ROOT="$2"; shift 2 ;;
     --poses-root)         POSES_ROOT="$2"; shift 2 ;;
     --skip-setup)         SKIP_SETUP=1; shift ;;
@@ -281,17 +295,37 @@ done
 # -----------------------------------------------------------------------------
 # Derived paths
 # -----------------------------------------------------------------------------
+if [[ "$SEG_SOURCE" != "mask2former" && "$SEG_SOURCE" != "sam3" ]]; then
+  echo "Invalid --seg-source '$SEG_SOURCE' (expected: mask2former | sam3)" >&2
+  exit 1
+fi
+
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPTH_DIR="$OUT_DIR/depth_predictions"
 PANO_DIR="$OUT_DIR/panoptic_predictions"
+SAM3_DIR="$OUT_DIR/sam3_predictions"
 CLOUDS_DIR="$OUT_DIR/semantic_clouds"
-CLOUD_PLY="$CLOUDS_DIR/seq${SEQUENCE}_static.ply"
-CLOUD_NPZ="$CLOUDS_DIR/seq${SEQUENCE}_static.npz"
 SMOKE_OUT="$OUT_DIR/semantic_gs_smoke"
 PANO_SEQ_DIR="$PANO_DIR/$SEQUENCE"
+SAM3_SEQ_DIR="$SAM3_DIR/$SEQUENCE"
 DEPTH_SEQ_DIR="$DEPTH_DIR/$SEQUENCE"
-# Phase-3 outputs (one subdir per sequence so reruns don't clobber)
-GS_RUN_DIR="$OUT_DIR/semantic_gs_runs/seq${SEQUENCE}"
+# Per-seg-source outputs (distinct paths so both pipelines can coexist).
+# CLOUD_PLY only exists on the mask2former path (the lift script writes it);
+# the sam3 init script writes the NPZ directly.
+if [[ "$SEG_SOURCE" == "sam3" ]]; then
+  SEG_SEQ_DIR="$SAM3_SEQ_DIR"
+  CLOUD_PLY=""
+  CLOUD_NPZ="$CLOUDS_DIR/seq${SEQUENCE}_sam3_static.npz"
+  GS_RUN_DIR="$OUT_DIR/semantic_gs_runs/seq${SEQUENCE}_sam3"
+  SEG_ARGS=( --seg-source sam3 --sam3-dir "$SEG_SEQ_DIR" )
+else
+  SEG_SEQ_DIR="$PANO_SEQ_DIR"
+  CLOUD_PLY="$CLOUDS_DIR/seq${SEQUENCE}_static.ply"
+  CLOUD_NPZ="$CLOUDS_DIR/seq${SEQUENCE}_static.npz"
+  # Phase-3 outputs (one subdir per sequence so reruns don't clobber)
+  GS_RUN_DIR="$OUT_DIR/semantic_gs_runs/seq${SEQUENCE}"
+  SEG_ARGS=( --pano-dir "$SEG_SEQ_DIR" )
+fi
 
 # -----------------------------------------------------------------------------
 # Pretty-print helpers
@@ -309,6 +343,7 @@ header "Pre-flight"
 log "Repo dir        : $REPO_DIR"
 log "AFM_ROOT        : $AFM_ROOT"
 log "Sequence        : $SEQUENCE  (n_frames lift = $N_FRAMES_LIFT, batch = $BATCH_SIZE)"
+log "Seg source      : $SEG_SOURCE"
 log "Output dir      : $OUT_DIR"
 log "KITTI mirror    : $DATA_ROOT"
 log "Conda env       : $CONDA_ENV"
@@ -597,9 +632,31 @@ EOF
 fi
 
 # -----------------------------------------------------------------------------
-# Stage 4 : Mask2Former panoptic
+# Stage 4 : per-frame segmentation (Mask2Former or SAM 3, per --seg-source)
 # -----------------------------------------------------------------------------
-if [[ $SKIP_GEN -eq 0 ]]; then
+if [[ $SKIP_GEN -eq 0 && "$SEG_SOURCE" == "sam3" ]]; then
+  header "Stage 4 / 10 : SAM 3 concept segmentation  (GPU)"
+  N_DONE=$(count_npz "$SAM3_SEQ_DIR")
+  if (( N_DONE >= N_PNGS )); then
+    log "All $N_PNGS SAM 3 NPZs already exist — skipping."
+  else
+    if [[ ! -f "$SAM3_CKPT" ]]; then
+      err "SAM 3 checkpoint not found at: $SAM3_CKPT"
+      err "Download sam3.pt (~3.3 GB) from the shared team cloud storage into"
+      err "  $(dirname "$SAM3_CKPT")/   (or pass --sam3-ckpt FILE)."
+      exit 3
+    fi
+    # NOTE: tracking is stateful — run_sam3_inference.py itself skips a
+    # sequence only when ALL frames exist and otherwise reruns it from
+    # frame 0, so a partial dir here is regenerated consistently.
+    log "Status: $N_DONE / $N_PNGS already done. Running SAM 3..."
+    python "$REPO_DIR/scripts/run_sam3_inference.py" \
+      --dataset_root "$DATA_ROOT" \
+      --sequences    "$SEQUENCE" \
+      --checkpoint   "$SAM3_CKPT" \
+      --output_dir   "$SAM3_DIR"
+  fi
+elif [[ $SKIP_GEN -eq 0 ]]; then
   header "Stage 4 / 10 : Mask2Former panoptic inference  (GPU)"
   N_DONE=$(count_npz "$PANO_SEQ_DIR")
   if (( N_DONE >= N_PNGS )); then
@@ -636,9 +693,25 @@ if [[ $SKIP_GEN -eq 0 ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-# Stage 6 : lift to static semantic point cloud
+# Stage 6 : init static semantic point cloud
+#   mask2former → teammate lift script (PLY + NPZ)
+#   sam3        → semantic_gs.scripts.init_pc_from_loader (NPZ)
 # -----------------------------------------------------------------------------
-if [[ $SKIP_GEN -eq 0 ]]; then
+if [[ $SKIP_GEN -eq 0 && "$SEG_SOURCE" == "sam3" ]]; then
+  header "Stage 6 / 10 : init cloud from SAM 3 loader  (CPU, ~1-2 min)"
+  if [[ -f "$CLOUD_NPZ" ]]; then
+    log "Init cloud already exists. Delete to regenerate:"
+    log "  $CLOUD_NPZ"
+  else
+    log "Back-projecting static pixels → $CLOUD_NPZ"
+    python -m semantic_gs.scripts.init_pc_from_loader \
+      --kitti-odom-seq "$DATA_ROOT/$SEQUENCE" \
+      --depth-dir      "$DEPTH_SEQ_DIR" \
+      --sam3-dir       "$SAM3_SEQ_DIR" \
+      --pose-path      "$POSES_FILE" \
+      --out            "$CLOUD_NPZ"
+  fi
+elif [[ $SKIP_GEN -eq 0 ]]; then
   header "Stage 6 / 10 : lift to static semantic point cloud  (CPU, ~30 s)"
   if [[ -f "$CLOUD_PLY" && -f "$CLOUD_NPZ" ]]; then
     log "Lift output already exists. Delete to regenerate:"
@@ -692,14 +765,14 @@ header "Stage 7 / 10 : Phase 0 — pytest (YOUR hermetic test suite)"
 ( cd "$REPO_DIR" && python -m pytest -q )
 
 header "Stage 8 / 10 : Phase 1 — YOUR KITTI loader against REAL teammate output"
-if [[ ! -d "$PANO_SEQ_DIR" || ! -d "$DEPTH_SEQ_DIR" ]]; then
-  warn "Teammate per-frame outputs missing — skipping Phase 1 real-data test."
+if [[ ! -d "$SEG_SEQ_DIR" || ! -d "$DEPTH_SEQ_DIR" ]]; then
+  warn "Per-frame outputs missing ($SEG_SOURCE + depth) — skipping Phase 1 real-data test."
   warn "Run without --skip-gen to generate them first."
 else
   python -m semantic_gs.scripts.smoke_test_adapters \
     --kitti-odom-seq "$DATA_ROOT/$SEQUENCE" \
     --depth-dir      "$DEPTH_SEQ_DIR" \
-    --pano-dir       "$PANO_SEQ_DIR" \
+    "${SEG_ARGS[@]}" \
     --pose-path      "$POSES_FILE" \
     --frames 0 50 100 200 \
     --out            "$SMOKE_OUT"
@@ -737,7 +810,7 @@ else
   python -m semantic_gs.scripts.train_gs \
     --kitti-odom-seq "$DATA_ROOT/$SEQUENCE" \
     --depth-dir      "$DEPTH_SEQ_DIR" \
-    --pano-dir       "$PANO_SEQ_DIR" \
+    "${SEG_ARGS[@]}" \
     --pose-path      "$POSES_FILE" \
     --init-pc        "$CLOUD_NPZ" \
     --out            "$GS_RUN_DIR" \

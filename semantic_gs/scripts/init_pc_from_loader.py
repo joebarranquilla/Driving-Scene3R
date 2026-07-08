@@ -32,6 +32,7 @@ import numpy as np
 from semantic_gs.data.adapters.kitti_odom_sam3 import KITTISam3SequenceLoader
 from semantic_gs.data.adapters.sam3_npz import DEFAULT_ROAD_CONCEPTS
 from semantic_gs.data.frame import Frame
+from semantic_gs.geometry.cameras import unproject_pixels
 
 # Per-point semantic labels in the init cloud (Cityscapes label space).
 ROAD_LABEL = 0     # Cityscapes id 0 = road (see semantic_gs/data/cityscapes.py)
@@ -96,7 +97,6 @@ def _backproject_frame(
     ``labels`` is ``ROAD_LABEL`` for kept road pixels, ``UNKNOWN_LABEL`` otherwise.
     """
     cam = f.camera
-    fx, fy, cx, cy = cam.fx, cam.fy, cam.cx, cam.cy
     H, W = cam.height, cam.width
 
     keep = (
@@ -114,15 +114,14 @@ def _backproject_frame(
         empty = np.zeros((0, 3), dtype=np.float32)
         return empty, empty.copy(), np.zeros((0,), dtype=np.int32)
 
-    u_grid, v_grid = np.meshgrid(np.arange(W), np.arange(H))
-    Z = f.depth[keep].astype(np.float32)
-    X = ((u_grid[keep] - cx) * Z / fx).astype(np.float32)
-    Y = ((v_grid[keep] - cy) * Z / fy).astype(np.float32)
-    xyz_cam = np.stack([X, Y, Z], axis=-1)                       # (M, 3)
+    # np.nonzero yields row-major coords in the same order as f.depth[keep],
+    # f.rgb[keep] and road_px[keep] below.
+    vs, us = np.nonzero(keep)
+    xyz_cam = unproject_pixels(cam, us, vs, f.depth[keep])       # (M, 3)
 
-    R = f.T_cam_to_world[:3, :3].astype(np.float32)
-    t = f.T_cam_to_world[:3,  3].astype(np.float32)
-    xyz_world = xyz_cam @ R.T + t                                # (M, 3)
+    R = f.T_cam_to_world[:3, :3]
+    t = f.T_cam_to_world[:3,  3]
+    xyz_world = (xyz_cam @ R.T + t).astype(np.float32)           # (M, 3)
 
     rgb = f.rgb[keep].astype(np.float32) / 255.0
 

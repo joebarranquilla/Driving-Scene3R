@@ -52,7 +52,7 @@ IMAGE_NAME = os.path.basename(os.path.dirname(IMAGE_PATH))
 
 image = load_image(IMAGE_PATH)
 masks = load_masks(os.path.dirname(IMAGE_PATH), extension=".png")
-display_image(image, masks)
+#display_image(image, masks)
 
 print(f"Loaded image: {IMAGE_PATH}")
 
@@ -75,26 +75,9 @@ print("Gaussian splats generated for all objects.")
 
 scene_gs = make_scene(*outputs)
 print("Scene Gaussian splats created.")
+#scene_gs.scale_to_target_size()
 # export posed gaussian splatting (as point cloud)
 scene_gs.save_ply(f"{PATH}/notebook/gaussians/{IMAGE_NAME}_posed.ply")
 print(f"Posed Gaussian splats saved as PLY: {IMAGE_NAME}_posed.ply")
-
 scene_gs = ready_gaussian_for_video_rendering(scene_gs)
-
-video = render_video(
-    scene_gs,
-    r=1,
-    fov=60,
-    resolution=512,
-)["color"]
-
-# save video as gif
-imageio.mimsave(
-    os.path.join(f"{PATH}/notebook/gaussians/multi/{IMAGE_NAME}.gif"),
-    video,
-    format="GIF",
-    duration=1000 / 30,  # default assuming 30fps from the input MP4
-    loop=0,  # 0 means loop indefinitely
-)
-
-print(f"Video saved as GIF: {IMAGE_NAME}.gif")
+scene_gs.save_ply(f"{PATH}/notebook/gaussians/multi/{IMAGE_NAME}.ply")

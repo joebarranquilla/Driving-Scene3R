@@ -3,6 +3,7 @@ import torch
 import numpy as np
 from plyfile import PlyData, PlyElement
 from .general_utils import inverse_sigmoid, strip_symmetric, build_scaling_rotation
+import math
 
 
 class Gaussian:
@@ -132,16 +133,40 @@ class Gaussian:
         for i in range(self._rotation.shape[1]):
             l.append("rot_{}".format(i))
         return l
+    
+    def scale_to_target_size(self, target_max_dim=4.5, center=True):
+        """
+        Uniformly scales the splat scene so its longest bounding-box
+        side equals target_max_dim (in the same units as your xyz, e.g. meters).
+        """
+        with torch.no_grad():
+            xyz = self.get_xyz.detach()
+            bbox_min = xyz.min(dim=0).values
+            bbox_max = xyz.max(dim=0).values
+            extent = bbox_max - bbox_min
+            current_max_dim = extent.max().item()
+
+            if current_max_dim == 0:
+                raise ValueError("Bounding box has zero extent, cannot scale.")
+
+            factor = target_max_dim / current_max_dim
+
+            if center:
+                centroid = (bbox_min + bbox_max) / 2.0
+                # move to origin, scale, keep at origin (or shift back if you prefer)
+                self._xyz.sub_(centroid)
+                self._xyz.mul_(factor)
+            else:
+                self._xyz.mul_(factor)
+
+            # Scale the Gaussian extents too — critical step!
+            self._scaling.add_(math.log(factor))
+
+        return factor
 
     def save_ply(self, path):
-        import time
-
-        t0 = time.time()
-
-        print("num gaussians:", self.get_xyz.shape[0])
-
-        xyz = self.get_xyz.detach().cpu().numpy().astype(np.float32, copy=False)
-
+        xyz = self.get_xyz.detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
         f_dc = (
             self._features_dc.detach()
             .transpose(1, 2)
@@ -149,102 +174,52 @@ class Gaussian:
             .contiguous()
             .cpu()
             .numpy()
-            .astype(np.float32, copy=False)
         )
+        opacities = inverse_sigmoid(self.get_opacity).detach().cpu().numpy()
+        scale = torch.log(self.get_scaling).detach().cpu().numpy()
+        rotation = (self._rotation + self.rots_bias[None, :]).detach().cpu().numpy()
 
-        opacities = (
-            inverse_sigmoid(self.get_opacity)
-            .detach()
-            .cpu()
-            .numpy()
-            .astype(np.float32, copy=False)
-        )
-
-        scale = (
-            torch.log(self.get_scaling)
-            .detach()
-            .cpu()
-            .numpy()
-            .astype(np.float32, copy=False)
-        )
-
-        rotation = (
-            (self._rotation + self.rots_bias[None, :])
-            .detach()
-            .cpu()
-            .numpy()
-            .astype(np.float32, copy=False)
-        )
-
+        # 1. Base attributes from the original 3DGS code
         names = self.construct_list_of_attributes()
+        dtype_full = [(attribute, "f4") for attribute in names]
+        
+        # 2. FIX: Append explicit RGB fields to the PLY data structure
+        dtype_full.extend([("red", "u1"), ("green", "u1"), ("blue", "u1")]) # "u1" means uint8
 
-        # add color channels (uint8) so PLY viewers show vertex colors
-        dtype_full = [(name, "f4") for name in names] + [("red", "u1"), ("green", "u1"), ("blue", "u1")]
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate(
+            (xyz, normals, f_dc, opacities, scale, rotation), axis=1
+        )
+        attributes = attributes.astype("f4")
 
-        N = xyz.shape[0]
-        elements = np.empty(N, dtype=dtype_full)
+        # Fill base attributes
+        for i, name in enumerate(names):
+            elements[name] = attributes[:, i]
 
-        idx = 0
-
-        # xyz
-        for k in range(3):
-            elements[names[idx]] = xyz[:, k]
-            idx += 1
-
-        # normals (all zeros)
-        for _ in range(3):
-            elements[names[idx]] = 0.0
-            idx += 1
-
-        # SH/DC features
-        for k in range(f_dc.shape[1]):
-            elements[names[idx]] = f_dc[:, k]
-            idx += 1
-
-        # opacity
-        for k in range(opacities.shape[1]):
-            elements[names[idx]] = opacities[:, k]
-            idx += 1
-
-        # scale
-        for k in range(scale.shape[1]):
-            elements[names[idx]] = scale[:, k]
-            idx += 1
-
-        # rotation
-        for k in range(rotation.shape[1]):
-            elements[names[idx]] = rotation[:, k]
-            idx += 1
-
-        # derive RGB from DC features (first 3 DC channels) when available
+        # 3. Calculate RGB values safely
         try:
-            # f_dc columns correspond to DC color channels first (R,G,B)
             if f_dc.shape[1] >= 3:
                 rgb = f_dc[:, :3]
             else:
-                # fallback: replicate first channel
                 rgb = np.repeat(f_dc[:, :1], 3, axis=1)
         except Exception:
+            N = xyz.shape[0]
             rgb = np.zeros((N, 3), dtype=np.float32)
 
-        # convert to uint8 0-255 using same offseting used elsewhere (approx)
+        # 4. Convert SH base to 0-255 RGB bytes. 
+        # Note: 3DGS usually scales SH by a constant (0.28209). 
+        # If the colors look deeply oversaturated or weird, you may need to use:
+        # SH_C0 = 0.28209479177387814
+        # rgb = 0.5 + SH_C0 * rgb
         rgb_bytes = np.clip((rgb + 0.5) * 255.0, 0, 255).astype(np.uint8)
 
+        # 5. FIX: These will now work because "red", "green", "blue" are in dtype_full
         elements["red"] = rgb_bytes[:, 0]
         elements["green"] = rgb_bytes[:, 1]
         elements["blue"] = rgb_bytes[:, 2]
 
-        print(f"structured array built in {time.time() - t0:.2f}s")
-
-        t1 = time.time()
-
         el = PlyElement.describe(elements, "vertex")
-
-        print("writing ply...")
         PlyData([el]).write(path)
-
-        print(f"write time: {time.time() - t1:.2f}s")
-        print(f"total time: {time.time() - t0:.2f}s")
 
     def load_ply(self, path):
         plydata = PlyData.read(path)

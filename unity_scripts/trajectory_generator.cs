@@ -4,9 +4,26 @@ using UnityEngine;
 
 public class TrajectoryGenerator : MonoBehaviour
 {
+    // A custom struct to bundle position and rotation together
+    [Serializable]
+    public struct TrajectoryPoint
+    {
+        public Vector3 position;
+        public Quaternion rotation;
+
+        public TrajectoryPoint(Vector3 position, Quaternion rotation)
+        {
+            this.position = position;
+            this.rotation = rotation;
+        }
+    }
+
     [Header("Destination")]
     [Tooltip("The final XYZ coordinates you want the object to reach.")]
     public Vector3 targetPosition;
+    
+    [Tooltip("The final rotation (in Euler angles) you want the object to have at the destination.")]
+    public Vector3 targetRotationEuler;
 
     [Header("Path Settings")]
     [Tooltip("How many waypoints to generate. Higher numbers mean a smoother curve.")]
@@ -16,12 +33,15 @@ public class TrajectoryGenerator : MonoBehaviour
     [Tooltip("Controls the curve shape. Pulls the middle of the path toward this offset.")]
     public Vector3 curveOffset = new Vector3(0, 5f, 0);
 
+    [Tooltip("If true, rotates smoothly from start to target rotation. If false, strictly keeps the object's original starting rotation across the whole path.")]
+    public bool interpolateRotation = false;
+
     [Header("Gizmos (Editor Preview)")]
     public bool showPreview = true;
     public Color previewColor = Color.green;
 
-    // This list holds the generated path
-    private List<Vector3> generatedWaypoints = new List<Vector3>();
+    // Modified to hold our new struct containing both position and rotation
+    private List<TrajectoryPoint> generatedWaypoints = new List<TrajectoryPoint>();
 
     void Start()
     {
@@ -29,51 +49,53 @@ public class TrajectoryGenerator : MonoBehaviour
     }
 
     /// <summary>
-    /// Generates a smooth Bezier curve from the object's current position to the target position.
+    /// Generates a smooth Bezier curve keeping or interpolating the rotation data.
     /// </summary>
-    public List<Vector3> GeneratePath()
+    public List<TrajectoryPoint> GeneratePath()
     {
         generatedWaypoints.Clear();
 
         Vector3 startPoint = transform.position;
         Vector3 endPoint = targetPosition;
 
-        // We create a control point in the middle to give the path a smooth curve.
-        // It's halfway between start and end, shifted by our custom curveOffset.
+        // Capture the original rotation degrees of the object at the moment of generation
+        Quaternion startRotation = transform.rotation;
+        Quaternion endRotation = interpolateRotation ? Quaternion.Euler(targetRotationEuler) : startRotation;
+
         Vector3 controlPoint = Vector3.Lerp(startPoint, endPoint, 0.5f) + curveOffset;
 
         for (int i = 0; i < resolution; i++)
         {
-            // t goes from 0.0 (start) to 1.0 (end)
             float t = i / (float)(resolution - 1);
             
-            // Calculate Quadratic Bezier Curve point
+            // Calculate Position
             Vector3 pathPoint = CalculateBezierPoint(t, startPoint, controlPoint, endPoint);
-            generatedWaypoints.Add(pathPoint);
+            
+            // Calculate Rotation (Slerp handles spherical interpolation seamlessly)
+            Quaternion pathRotation = Quaternion.Slerp(startRotation, endRotation, t);
+
+            generatedWaypoints.Add(new TrajectoryPoint(pathPoint, pathRotation));
         }
 
-        Debug.Log($"Generated a trajectory with {generatedWaypoints.Count} points starting from {startPoint} to {endPoint}.");
+        Debug.Log($"Generated a trajectory with {generatedWaypoints.Count} points. Rotation tracking active.");
         return generatedWaypoints;
     }
 
-    /// <summary>
-    /// Quadratic Bezier formula: B(t) = (1-t)^2 * P0 + 2(1-t)t * P1 + t^2 * P2
-    /// </summary>
     private Vector3 CalculateBezierPoint(float t, Vector3 p0, Vector3 p1, Vector3 p2)
     {
         float u = 1 - t;
         float tt = t * t;
         float uu = u * u;
 
-        Vector3 point = uu * p0; // (1-t)^2 * P0
-        point += 2 * u * t * p1; // 2(1-t)t * P1
-        point += tt * p2;        // t^2 * P2
+        Vector3 point = uu * p0;
+        point += 2 * u * t * p1;
+        point += tt * p2;
 
         return point;
     }
 
-    // Public getter so your TrajectoryFollower script can access these points
-    public List<Vector3> GetWaypoints()
+    // Updated public getter returning the combined dataset
+    public List<TrajectoryPoint> GetWaypoints()
     {
         if (generatedWaypoints.Count == 0)
         {
@@ -82,7 +104,6 @@ public class TrajectoryGenerator : MonoBehaviour
         return generatedWaypoints;
     }
 
-    // Draws a line in the Unity Scene view so you can see the path before pressing Play
     private void OnDrawGizmos()
     {
         if (!showPreview) return;
@@ -92,17 +113,25 @@ public class TrajectoryGenerator : MonoBehaviour
         Vector3 controlPoint = Vector3.Lerp(startPoint, endPoint, 0.5f) + curveOffset;
 
         Gizmos.color = previewColor;
-        Vector3 previousPoint = startPoint;
+        Vector3 previousPosition = startPoint;
+
+        Quaternion startRotation = transform.rotation;
+        Quaternion endRotation = interpolateRotation ? Quaternion.Euler(targetRotationEuler) : startRotation;
 
         for (int i = 1; i <= resolution; i++)
         {
             float t = i / (float)resolution;
-            Vector3 currentPoint = CalculateBezierPoint(t, startPoint, controlPoint, endPoint);
-            Gizmos.DrawLine(previousPoint, currentPoint);
-            previousPoint = currentPoint;
+            Vector3 currentPosition = CalculateBezierPoint(t, startPoint, controlPoint, endPoint);
+            Gizmos.DrawLine(previousPosition, currentPosition);
+
+            // Draw small orientation axes along the path preview
+            Quaternion currentRotation = Quaternion.Slerp(startRotation, endRotation, t);
+            Gizmos.color = Color.red; // Forward axis indicator
+            Gizmos.DrawRay(currentPosition, currentRotation * Vector3.forward * 0.4f);
+
+            previousPosition = currentPosition;
         }
 
-        // Draw helper spheres at the start, control, and end points
         Gizmos.color = Color.blue;
         Gizmos.DrawWireSphere(startPoint, 0.3f);
         Gizmos.color = Color.red;

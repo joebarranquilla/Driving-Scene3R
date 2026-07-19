@@ -23,7 +23,6 @@ public class TrajectoryFollower : MonoBehaviour
     [Tooltip("Distance to a waypoint before advancing to the next one.")]
     public float waypointThreshold = 0.3f;
 
-    // CHANGED: Now storing our paired Position and Rotation struct instead of just Vector3
     private List<TrajectoryGenerator.TrajectoryPoint> waypoints = new List<TrajectoryGenerator.TrajectoryPoint>();
     private int currentWaypoint = 0;
 
@@ -31,17 +30,14 @@ public class TrajectoryFollower : MonoBehaviour
     {
         if (loadFromJson)
         {
-            // --- SOURCE A: Load from JSON ---
             Vector3 startingPosition = transform.position;
             LoadTrajectoryFromJson(startingPosition);
         }
         else
         {
-            // --- SOURCE B: Get from the Generator Script ---
             TrajectoryGenerator generator = GetComponent<TrajectoryGenerator>();
             if (generator != null)
             {
-                // CHANGED: Pulls the new struct list directly
                 waypoints = generator.GetWaypoints();
                 Debug.Log($"{gameObject.name}: Loaded {waypoints.Count} waypoints from Generator.");
             }
@@ -51,7 +47,6 @@ public class TrajectoryFollower : MonoBehaviour
             }
         }
 
-        // Initialize movement if we have waypoints
         if (waypoints.Count > 0)
         {
             currentWaypoint = 1; 
@@ -85,8 +80,7 @@ public class TrajectoryFollower : MonoBehaviour
             Vector3 rawFirstWaypoint = new Vector3(traj.x[0], traj.y[0], traj.z[0]);
             Vector3 offset = startOffsetPos - rawFirstWaypoint;
 
-            // Capture the object's current rotation to bake into the JSON positions 
-            // since raw JSON data lacks rotation properties.
+            // Capture the object's starting rotation to act as a baseline offset
             Quaternion initialRotation = transform.rotation;
 
             for (int i = 0; i < traj.x.Count; i++)
@@ -94,8 +88,19 @@ public class TrajectoryFollower : MonoBehaviour
                 Vector3 rawPoint = new Vector3(traj.x[i], traj.y[i], traj.z[i]);
                 Vector3 finalPos = rawPoint + offset;
                 
-                // CHANGED: Bundling JSON positions with the initial starting rotation
-                waypoints.Add(new TrajectoryGenerator.TrajectoryPoint(finalPos, initialRotation));
+                // --- UPDATED: Parse theta and convert from Radians to Degrees ---
+                // Based on your data, x and z move drastically while y remains relatively flat, 
+                // meaning theta represents Yaw (rotation around the Y-axis).
+                float yawDegrees = 0f;
+                if (traj.theta != null && traj.theta.Count > i)
+                {
+                    yawDegrees = traj.theta[i] * Mathf.Rad2Deg;
+                }
+
+                // Combine the JSON yaw rotation with your car's initial editor rotation
+                Quaternion trajectoryRotation = initialRotation * Quaternion.Euler(0f, yawDegrees, 0f);
+                
+                waypoints.Add(new TrajectoryGenerator.TrajectoryPoint(finalPos, trajectoryRotation));
             }
         }
     }
@@ -105,7 +110,6 @@ public class TrajectoryFollower : MonoBehaviour
         if (currentWaypoint >= waypoints.Count)
             return;
 
-        // CHANGED: Extract the current target point bundle
         TrajectoryGenerator.TrajectoryPoint targetPoint = waypoints[currentWaypoint];
 
         // Move towards the target position
@@ -118,7 +122,6 @@ public class TrajectoryFollower : MonoBehaviour
         // Handle Rotation
         if (useStoredRotation)
         {
-            // NEW: Directly set/blend to the rotation preserved by the generator
             transform.rotation = Quaternion.RotateTowards(
                 transform.rotation,
                 targetPoint.rotation,
@@ -127,7 +130,6 @@ public class TrajectoryFollower : MonoBehaviour
         }
         else
         {
-            // OLD STYLE: Dynamically look forward towards the point instead
             Vector3 direction = targetPoint.position - transform.position;
             if (direction.sqrMagnitude > 0.0001f)
             {
@@ -147,9 +149,16 @@ public class TrajectoryFollower : MonoBehaviour
         }
     }
 
-    // --- JSON Classes ---
+    // --- UPDATED JSON Classes ---
     [Serializable]
-    public class TrajectoryContainer { public List<float> x; public List<float> y; public List<float> z; }
+    public class TrajectoryContainer 
+    { 
+        public List<float> x; 
+        public List<float> y; 
+        public List<float> z; 
+        public List<float> theta; // Added to map the JSON's orientation array
+    }
+    
     [Serializable]
     public class RootTrajectoryData { public TrajectoryContainer trajectory; }
 }

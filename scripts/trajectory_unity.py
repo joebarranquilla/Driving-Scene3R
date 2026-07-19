@@ -35,27 +35,19 @@ def ema_filter(data, alpha=0.05):
 
     return filtered
 
-def deadband_filter(data, threshold=0.1):
-
+def moving_average(data, window_size=5):
+    """Smoothes data without freezing or deadbands."""
     data = np.asarray(data, dtype=float)
+    window = np.ones(window_size) / window_size
+    # Use 'edge' mode padding to prevent the trajectory from pulling toward zero at the ends
+    return np.convolve(np.pad(data, window_size//2, mode='edge'), window, mode='valid')
 
-    filtered = np.zeros_like(data)
-    filtered[0] = data[0]
-
-    for i in range(1, len(data)):
-        if abs(data[i] - filtered[i-1]) > threshold:
-            filtered[i] = data[i]
-        else:
-            filtered[i] = filtered[i-1]
-
-    return filtered
-
-world_ply = PlyData.read('../gaussians.ply')
+world_ply = PlyData.read('../gaussians/gaussians_00.ply')
 wv = world_ply['vertex']
 world_xyz = np.stack([wv['x'], wv['y'], wv['z']], axis=-1)
 #read the target from the JSON file
 new_targets = []
-with open("optimal_trajectory.json", 'r') as f:
+with open("../road_layout/seq00/output/optimal_trajectory.json", 'r') as f:
     json_data = json.load(f)
     traj = json_data.get('trajectory')
     if traj is None:
@@ -63,7 +55,8 @@ with open("optimal_trajectory.json", 'r') as f:
 
     xs = traj.get('x')
     ys = traj.get('y')
-    zs = traj.get('z')    
+    zs = traj.get('z')  
+    thetas = traj.get('theta')  
 
     for i in range(len(xs)):
         target = np.array([xs[i], ys[i], zs[i]])
@@ -86,15 +79,35 @@ with open("optimal_trajectory.json", 'r') as f:
         target[1] = -(local_world_y)
         target[1] += 0.5
         new_targets.append(target)
+        print(f"{len(new_targets)} out of {len(xs)} targets processed")
 
 xs = [t[0] for t in new_targets]
 ys = [t[1] for t in new_targets]
 zs = [t[2] for t in new_targets]
+
 smoothed_y = smooth_outliers(ys, threshold=1.0)
-smoothed_x = deadband_filter(xs, threshold=0.3)
-smoothed_x = ema_filter(smoothed_x, alpha=0.02)
+smoothed_x = moving_average(xs, window_size=5)
+smoothed_x = ema_filter(smoothed_x, alpha=0.25)
+# Calculate the differences between consecutive waypoints
+dx = np.diff(smoothed_x)
+dz = np.diff(zs)
 
-with open("smoothed_targets.json", "w") as f:
-    json.dump({"trajectory": {"x": smoothed_x.tolist(), "y": smoothed_y.tolist(), "z": zs}}, f, indent=4)    
+# Calculate angles from the displacement vectors (in radians)
+# This aligns perfectly with the XZ plane movement
+calculated_thetas = np.arctan2(dx, dz) 
 
+# Duplicate the last angle so the array length matches the original data length (50 steps)
+calculated_thetas = np.append(calculated_thetas, calculated_thetas[-1])
 
+# Inject the freshly calculated, lag-free angles into the JSON
+json_data['trajectory']['theta'] = calculated_thetas.tolist()
+
+# --- SOLUTION: Update the original JSON structure in-place ---
+# Update the specific arrays inside the trajectory dictionary
+json_data['trajectory']['x'] = smoothed_x.tolist()
+json_data['trajectory']['y'] = smoothed_y.tolist()
+json_data['trajectory']['z'] = zs  # Use the adjusted z-coordinates if they changed, or keep original
+
+# Save the full json_data dictionary to maintain the exact metadata and extra arrays
+with open("smoothed_targets0.json", "w") as f:
+    json.dump(json_data, f, indent=4)
